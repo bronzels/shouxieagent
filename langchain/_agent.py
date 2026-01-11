@@ -18,7 +18,7 @@ SYSTEM_PROMPT = SystemMessage(content="""
 """)
 
 
-def get_app():
+def get_app(edged = False):
   tools = [
       search_doc,
       analyze_data,
@@ -78,12 +78,56 @@ def get_app():
           "messages": [llm.invoke(messages)]
       }
 
+  def agent_node_edged(state: AgentState):
+      """
+      edged 模式的 agent 节点：根据当前 stage 使用 tool_choice 强制调用下一个工具
+      """
+      messages = state["messages"]
+      if not any(m.type == "system" for m in messages):
+          messages.insert(0, SYSTEM_PROMPT)
+
+      stage = state.get("stage")
+
+      # 根据 stage 决定下一个要调用的工具
+      if stage is None:
+          # 第一步：强制调用 search_doc
+          llm_forced = get_chat_openai().bind_tools(
+              tools,
+              tool_choice={"type": "function", "function": {"name": "search_doc"}}
+          )
+      elif stage == "search_doc":
+          # 第二步：强制调用 analyze_data
+          llm_forced = get_chat_openai().bind_tools(
+              tools,
+              tool_choice={"type": "function", "function": {"name": "analyze_data"}}
+          )
+      elif stage == "analyze_data":
+          # 第三步：强制调用 generate_report
+          llm_forced = get_chat_openai().bind_tools(
+              tools,
+              tool_choice={"type": "function", "function": {"name": "generate_report"}}
+          )
+      else:
+          # 已完成所有工具调用，让模型自由回复
+          llm_forced = get_chat_openai().bind_tools(tools, tool_choice="none")
+
+      return {
+          "messages": [llm_forced.invoke(messages)]
+      }
+
   graph = StateGraph(AgentState)
 
-  graph.add_node("agent", agent_node)
+  # 根据 edged 参数选择不同的 agent 节点
+  if edged:
+      graph.add_node("agent", agent_node_edged)
+  else:
+      graph.add_node("agent", agent_node)
+
+  # 两种模式都使用统一的 tool_node
+  # edged 模式通过 tool_choice 强制工具选择，不需要独立节点
   graph.add_node("tool", tool_node)
 
-    # 3. 设置边逻辑
+  # 3. 设置边逻辑
   # agent -> tool （当模型请求 tool_calls 时）
 
   def force_inject_generate_report(state: AgentState, last_message: AIMessage) -> bool:
@@ -133,14 +177,14 @@ def get_app():
 
       return END
 
+  # edged 和非 edged 模式使用相同的路由逻辑
+  # edged 模式的工具强制选择已在 agent_node_edged 中通过 tool_choice 实现
   graph.add_conditional_edges(
-      "agent", 
-      # lambda state: "tool" if state["messages"][-1].tool_calls else END
+      "agent",
       route_after_agent
   )
 
   # tool -> agent (工具执行完返回 agent 继续决策)
-  #graph.add_edge("tool", "agent")
   graph.add_node("post_tool", update_stage_after_tool_call)
   graph.add_edge("tool", "post_tool")
   graph.add_edge("post_tool", "agent")

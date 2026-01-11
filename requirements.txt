@@ -60,3 +60,9 @@ uuid_utils==0.12.0
 xxhash==3.6.0
 yarl==1.22.0
 zstandard==0.25.0
+
+# Testing
+pytest==9.0.2
+iniconfig==2.3.0
+pluggy==1.6.0
+pygments==2.19.2
