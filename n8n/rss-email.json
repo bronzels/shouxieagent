@@ -1,0 +1,274 @@
+{
+  "name": "rss-email",
+  "nodes": [
+    {
+      "parameters": {
+        "url": "https://hnrss.org/newest?points=5",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.2,
+      "position": [
+        -544,
+        -128
+      ],
+      "id": "044371ae-604d-4d9c-b981-c088f54f2fc9",
+      "name": "RSS Read"
+    },
+    {
+      "parameters": {
+        "resource": "Default",
+        "operation": "Scrape A Url And Get Its Content",
+        "url": "={{ $json.link }}",
+        "requestOptions": {}
+      },
+      "type": "n8n-nodes-firecrawl.fireCrawl",
+      "typeVersion": 1,
+      "position": [
+        -128,
+        -128
+      ],
+      "id": "774c20ef-145d-42d3-a927-2e957f895c15",
+      "name": "Scrape A Url And Get Its Content",
+      "credentials": {
+        "fireCrawlApi": {
+          "id": "AHa8nr85lJeLbbF6",
+          "name": "FireCrawl account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "maxItems": 3
+      },
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        -336,
+        -128
+      ],
+      "id": "9bea0bcf-86f5-490d-a9f6-ca93e909dcfa",
+      "name": "Limit"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.data }}",
+        "options": {
+          "systemMessage": "你是一个新闻助手，我需要你把从网站上爬取的数据，整理成一个新闻简报。"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        80,
+        -128
+      ],
+      "id": "3d0b0209-625c-449a-be0b-c62ca2c3dd77",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": "deepseek/deepseek-r1",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        -48,
+        80
+      ],
+      "id": "97dc1239-5e66-4902-b969-8ec7ce819830",
+      "name": "OpenRouter Chat Model",
+      "credentials": {
+        "openRouterApi": {
+          "id": "BNtBt2Q4qeBnywZY",
+          "name": "OpenRouter account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fieldsToAggregate": {
+          "fieldToAggregate": [
+            {
+              "fieldToAggregate": "output"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        416,
+        -128
+      ],
+      "id": "f2da00cf-ab45-4bd1-884f-9b35cfc80bda",
+      "name": "Aggregate"
+    },
+    {
+      "parameters": {
+        "mode": "markdownToHtml",
+        "markdown": "={{ $json.output.join(\"\\n\\n\") }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.markdown",
+      "typeVersion": 1,
+      "position": [
+        624,
+        -128
+      ],
+      "id": "a49078e2-5587-48fe-a778-a5192adb3afb",
+      "name": "Markdown"
+    },
+    {
+      "parameters": {
+        "fromEmail": "13828881158@139.com",
+        "toEmail": "bronzels@qq.com",
+        "subject": "n8n新闻简报",
+        "html": "={{ $json.data }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        832,
+        -128
+      ],
+      "id": "efc18e1a-3827-404e-b42d-5aac87b1bc49",
+      "name": "Send an Email",
+      "webhookId": "1a164a5b-02a4-4eb7-960a-3f64f1c50c93",
+      "credentials": {
+        "smtp": {
+          "id": "qLdwtF7ZgUzfmMrE",
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 4
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -768,
+        -128
+      ],
+      "id": "f657b75b-7fba-4f0a-9a47-e385671183e1",
+      "name": "Schedule Trigger"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "RSS Read": {
+      "main": [
+        [
+          {
+            "node": "Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape A Url And Get Its Content": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Limit": {
+      "main": [
+        [
+          {
+            "node": "Scrape A Url And Get Its Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Aggregate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate": {
+      "main": [
+        [
+          {
+            "node": "Markdown",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Markdown": {
+      "main": [
+        [
+          {
+            "node": "Send an Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "RSS Read",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "37809114-16cc-4e31-ab7e-52fbcb116ba3",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d146aeda345ec76ab8d55331b4153302c119ec20d49b68b7d28085ca42c9fe02"
+  },
+  "id": "fbbcOJ02WqK7Xq2r",
+  "tags": []
+}

@@ -32,7 +32,10 @@ def run_agent_stream(edged: bool = False, user_message: str = "帮我查一下AI
         }
     ):
         events.append(event)
-        print("EVENT:", event)
+        try:
+            print("EVENT:", list(event.keys()))
+        except UnicodeEncodeError:
+            print("EVENT: (unicode error)")
 
         # 收集工具调用信息
         if "tool" in event:
