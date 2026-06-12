@@ -90,8 +90,9 @@ def encode_image(source) -> str:
         return base64.b64encode(source).decode()
     if isinstance(source, BytesIO):
         return base64.b64encode(source.getvalue()).decode()
-    # PIL Image
+    # PIL Image — force pixel load before saving (avoids lazy-load FP teardown)
     buf = BytesIO()
+    source.load()
     source.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
 
