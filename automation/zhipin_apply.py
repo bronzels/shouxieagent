@@ -123,15 +123,14 @@ async def call_uitars(image_path: str, task_prompt: str) -> str:
     """
     调用 OpenRouter UI-TARS 模型，给定截图和任务描述，返回模型响应（包含 Thought 和 Action）
     """
-    from ui_tars.prompt import COMPUTER_USE
+    from ui_tars.prompt import COMPUTER_USE_DOUBAO
 
     img_b64 = image_to_base64(image_path)
+    prompt_text = COMPUTER_USE_DOUBAO.format(
+        instruction=task_prompt, language="Chinese"
+    )
 
     messages = [
-        {
-            "role": "system",
-            "content": COMPUTER_USE,
-        },
         {
             "role": "user",
             "content": [
@@ -141,7 +140,7 @@ async def call_uitars(image_path: str, task_prompt: str) -> str:
                 },
                 {
                     "type": "text",
-                    "text": task_prompt,
+                    "text": prompt_text,
                 },
             ],
         },
@@ -225,7 +224,10 @@ async def verify_job_is_it_remote(image_path: str, job_title: str, job_desc: str
 
 def parse_uitars_action(response: str, screen_width: int, screen_height: int) -> dict | None:
     """
-    使用 ui-tars 包解析模型响应，返回动作结构
+    使用 ui-tars 包解析模型响应，返回第一个动作结构。
+    返回结构示例：
+      {"action_type": "click", "action_inputs": {"start_box": "[0.39, 0.37, 0.39, 0.37]"}}
+    start_box 中的坐标是 0-1 归一化值。
     """
     try:
         from ui_tars.action_parser import parse_action_to_structure_output
@@ -236,9 +238,23 @@ def parse_uitars_action(response: str, screen_width: int, screen_height: int) ->
             origin_resized_width=screen_width,
             model_type="qwen25vl",
         )
-        return parsed
+        return parsed[0] if parsed else None
     except Exception as e:
         print(f"  [WARN] 动作解析失败: {e}")
+        return None
+
+
+def _box_to_xy(action_inputs: dict, key: str, width: int, height: int) -> tuple[int, int] | None:
+    """将归一化 start_box/end_box 字符串转为页面像素坐标（取中心点）"""
+    box_str = action_inputs.get(key)
+    if not box_str:
+        return None
+    try:
+        box = json.loads(box_str)
+        x = (box[0] + box[2]) / 2 * width
+        y = (box[1] + box[3]) / 2 * height
+        return int(x), int(y)
+    except Exception:
         return None
 
 
@@ -250,40 +266,64 @@ async def execute_action_on_page(page: Page, action: dict):
         return
 
     action_type = action.get("action_type", "")
-    coordinates = action.get("coordinate", [])
+    inputs = action.get("action_inputs", {})
+    vw, vh = page.viewport_size["width"], page.viewport_size["height"]
 
-    if action_type in ("click", "left_click") and coordinates:
-        x, y = int(coordinates[0]), int(coordinates[1])
-        await human_mouse_move_and_click(page, x, y)
+    if action_type in ("click", "left_single"):
+        xy = _box_to_xy(inputs, "start_box", vw, vh)
+        if xy:
+            await human_mouse_move_and_click(page, *xy)
 
-    elif action_type == "double_click" and coordinates:
-        x, y = int(coordinates[0]), int(coordinates[1])
-        await page.mouse.dblclick(x, y)
-        human_delay(0.3, 0.7)
+    elif action_type == "left_double":
+        xy = _box_to_xy(inputs, "start_box", vw, vh)
+        if xy:
+            await page.mouse.dblclick(*xy)
+            human_delay(0.3, 0.7)
 
-    elif action_type == "right_click" and coordinates:
-        x, y = int(coordinates[0]), int(coordinates[1])
-        await page.mouse.click(x, y, button="right")
-        human_delay(0.3, 0.7)
+    elif action_type == "right_single":
+        xy = _box_to_xy(inputs, "start_box", vw, vh)
+        if xy:
+            await page.mouse.click(*xy, button="right")
+            human_delay(0.3, 0.7)
 
-    elif action_type == "type" and action.get("text"):
-        text = action["text"]
-        await page.keyboard.type(text, delay=random.randint(50, 150))
+    elif action_type == "drag":
+        start = _box_to_xy(inputs, "start_box", vw, vh)
+        end = _box_to_xy(inputs, "end_box", vw, vh)
+        if start and end:
+            await page.mouse.move(*start)
+            await page.mouse.down()
+            await page.mouse.move(*end, steps=random.randint(10, 20))
+            await page.mouse.up()
+            human_delay(0.3, 0.7)
+
+    elif action_type == "type" and inputs.get("content"):
+        text = inputs["content"]
+        submit = text.endswith("\n")
+        await page.keyboard.type(text.rstrip("\n"), delay=random.randint(50, 150))
+        if submit:
+            human_delay(0.3, 0.6)
+            await page.keyboard.press("Enter")
         human_delay(0.3, 0.8)
 
-    elif action_type == "scroll" and coordinates:
-        x, y = int(coordinates[0]), int(coordinates[1])
-        direction = action.get("direction", "down")
+    elif action_type == "scroll":
+        direction = (inputs.get("direction") or "down").lower()
         delta = random.randint(300, 500)
-        if direction == "down":
-            await page.mouse.wheel(0, delta)
-        else:
+        if "up" in direction:
             await page.mouse.wheel(0, -delta)
+        else:
+            await page.mouse.wheel(0, delta)
         human_delay(0.5, 1.2)
 
-    elif action_type == "key" and action.get("key"):
-        await page.keyboard.press(action["key"])
+    elif action_type == "hotkey" and inputs.get("key"):
+        # ui-tars 用空格分隔键，如 "ctrl c" → Playwright 格式 "Control+c"
+        key_map = {"ctrl": "Control", "shift": "Shift", "alt": "Alt", "enter": "Enter",
+                   "esc": "Escape", "tab": "Tab", "space": "Space", "backspace": "Backspace"}
+        keys = [key_map.get(k.lower(), k) for k in inputs["key"].split()]
+        await page.keyboard.press("+".join(keys))
         human_delay(0.2, 0.5)
+
+    elif action_type in ("finished", "wait"):
+        human_delay(0.5, 1.0)
 
 
 async def human_mouse_move_and_click(page: Page, x: int, y: int):
