@@ -31,6 +31,12 @@ if _env_file.exists():
             _k, _v = _line.split("=", 1)
             os.environ.setdefault(_k.strip(), _v.strip())
 
+# rebrowser-playwright 隐身配置（必须在导入/启动前设置）：
+# 缓解 Cloudflare 对 CDP 自动化的检测。addBinding 模式修补 Runtime.enable 泄露最隐蔽。
+os.environ.setdefault("REBROWSER_PATCHES_RUNTIME_FIX_MODE", "addBinding")
+os.environ.setdefault("REBROWSER_PATCHES_SOURCE_URL", "jquery.min.js")
+os.environ.setdefault("REBROWSER_PATCHES_UTILITY_WORLD_NAME", "util")
+
 import httpx
 from rebrowser_playwright.async_api import async_playwright, Page
 
@@ -301,8 +307,11 @@ def parse_salary_fill(salary_text: str) -> int:
 # ─── 主 Automator 类 ───────────────────────────────────────────────────────────────
 
 class JobsDBAutomator:
-    def __init__(self):
+    def __init__(self, dry_run=False):
         self.applied_data = load_applied_jobs()
+        self.dry_run = dry_run  # 试运行：登录+遍历+筛选+判断，但不点Apply/不填表单/不记录
+        self.cdp_url = None     # 若设置，则连接已运行的真实 Chrome（绕过 Cloudflare）
+        self.connected_cdp = False
         self.page: Page = None
         self.context = None
         self.viewport_width = 1280
@@ -312,9 +321,29 @@ class JobsDBAutomator:
 
     async def start_browser(self, playwright):
         """
-        启动真实 Chrome + 独立 jobsdb_profile 持久化目录。
-        用 rebrowser_playwright 避免反爬指纹检测。
+        两种模式：
+        1) CDP 连接模式（self.cdp_url 已设）：连接用户【自己打开的真实 Chrome】。
+           用户在真实浏览器里以正常用户身份通过 Cloudflare 验证并登录，脚本只接管驱动。
+           这是绕过 Cloudflare Turnstile（对 CDP 自动化检测极强）的可靠方式。
+        2) 自启动模式：rebrowser 启动真实 Chrome + 独立 jobsdb_profile（zhipin 同款，
+           但 JobsDB 的 Cloudflare 难以自动通过，推荐用模式1）。
         """
+        if self.cdp_url:
+            print(f"🔌 连接已运行的 Chrome (CDP): {self.cdp_url}", flush=True)
+            browser = await playwright.chromium.connect_over_cdp(self.cdp_url)
+            # 用已有的 context（用户登录态所在），没有则新建
+            self.context = browser.contexts[0] if browser.contexts else await browser.new_context()
+            pages = self.context.pages
+            # 优先选已在 jobsdb 的标签页
+            self.page = None
+            for pg in pages:
+                if "jobsdb" in (pg.url or ""):
+                    self.page = pg
+                    break
+            self.page = self.page or (pages[0] if pages else await self.context.new_page())
+            self.connected_cdp = True
+            return
+
         JOBSDB_PROFILE_DIR.mkdir(exist_ok=True)
         self.context = await playwright.chromium.launch_persistent_context(
             user_data_dir=str(JOBSDB_PROFILE_DIR),
@@ -334,9 +363,8 @@ class JobsDBAutomator:
             if self.context.pages
             else await self.context.new_page()
         )
-        await self.context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-        )
+        # 不再手动 add_init_script 改写 navigator.webdriver：
+        # rebrowser-playwright 已内置处理；重复改写反而制造 Cloudflare 可检测的痕迹。
 
     # ── 登录 ──────────────────────────────────────────────────────────────────────
 
@@ -368,6 +396,46 @@ class JobsDBAutomator:
         except Exception:
             return False
 
+    async def _wait_cloudflare_cleared(self, timeout_s: int = 300) -> bool:
+        """
+        等待 Cloudflare 人机验证通过。JobsDB 用 Cloudflare 防护，未通过时页面标题为
+        "Just a moment..." / "Performing security verification"，且需要【人工点击】
+        Turnstile 勾选框("Verify you are human")才能通过——无法自动绕过。
+        因此这里长时间轮询（默认 5 分钟），提示用户在浏览器完成验证，期间不关闭浏览器。
+        通过判定：标题不再是 just a moment 且页面出现真实内容。
+        """
+        def _is_challenge(title: str) -> bool:
+            t = (title or "").lower()
+            return ("just a moment" in t or "moment" in t
+                    or "security verification" in t or "verifying" in t
+                    or "attention required" in t or title.strip() == "")
+
+        title = await self.page.title()
+        if not _is_challenge(title):
+            return True
+
+        print("\n" + "=" * 60)
+        print("🛡️ 检测到 Cloudflare 人机验证页（Just a moment...）")
+        print("   👉 请在打开的浏览器里点击 'Verify you are human' 勾选框完成验证")
+        print("   脚本每 3 秒检测一次，最长等待 5 分钟，期间不会关闭浏览器")
+        print("=" * 60, flush=True)
+
+        loops = max(1, timeout_s // 3)
+        for i in range(loops):
+            await asyncio.sleep(3)
+            try:
+                title = await self.page.title()
+                if not _is_challenge(title):
+                    print(f"✅ Cloudflare 验证已通过（标题: {title[:40]}）", flush=True)
+                    human_delay(2.0, 3.0)
+                    return True
+            except Exception:
+                pass
+            if i % 5 == 4:
+                print(f"  ⏳ 仍在等待人机验证通过... ({(i+1)*3}秒)", flush=True)
+        print("⚠️ 等待 Cloudflare 验证超时（5分钟）", flush=True)
+        return False
+
     async def login(self) -> bool:
         """
         登录流程：
@@ -384,9 +452,33 @@ class JobsDBAutomator:
           - 验证码输入框: input[name='otp'], input[type='text'][maxlength]
           - 验证码提交: button:has-text('Verify'), button[type='submit']
         """
+        # CDP 连接模式：用户已在真实 Chrome 里通过 Cloudflare + 登录，脚本只校验登录态
+        if self.connected_cdp:
+            print("🔌 CDP 模式：使用你真实 Chrome 的会话（已绕过 Cloudflare）", flush=True)
+            try:
+                if "jobsdb" not in (self.page.url or ""):
+                    await self.page.goto("https://hk.jobsdb.com/", wait_until="domcontentloaded", timeout=40000)
+                    human_delay(2.0, 3.0)
+            except Exception:
+                pass
+            for i in range(40):  # 最多等 2 分钟你在真实 Chrome 完成登录
+                if await self._is_logged_in():
+                    print("✅ 已检测到登录状态（真实 Chrome 会话），继续执行", flush=True)
+                    return True
+                if i == 0:
+                    print("  ⏳ 未检测到登录态。请在你的 Chrome 里完成 JobsDB 登录，脚本每3秒检测...", flush=True)
+                await asyncio.sleep(3)
+            print("⚠️ 未检测到登录态（请确认已在真实 Chrome 登录 JobsDB）", flush=True)
+            return False
+
         print("🌐 正在打开 JobsDB...", flush=True)
-        await self.page.goto("https://hk.jobsdb.com/", wait_until="domcontentloaded", timeout=30000)
+        await self.page.goto("https://hk.jobsdb.com/", wait_until="domcontentloaded", timeout=40000)
         human_delay(3.0, 5.0)
+
+        # 先等 Cloudflare 人机验证通过（JobsDB 用 Cloudflare 防护，"Just a moment..."）
+        if not await self._wait_cloudflare_cleared():
+            print("⚠️ Cloudflare 人机验证未通过，无法继续。", flush=True)
+            return False
 
         if await self._is_logged_in():
             print("✅ 已检测到登录状态（jobsdb_profile 已保存登录态），继续执行", flush=True)
@@ -413,9 +505,7 @@ class JobsDBAutomator:
             "jobsdb_signin_btn.png",
         )
         if not clicked:
-            print("  ⚠️ 未找到 Sign in 按钮，请手动检查页面", flush=True)
-            # 不直接 return False，允许用户手动操作后继续
-            input("  请手动点击登录按钮后按 Enter 继续...")
+            print("  ⚠️ 未找到 Sign in 按钮，可在浏览器手动点登录入口（脚本后续会轮询等登录）", flush=True)
 
         human_delay(2.0, 3.0)
         await screenshot_page(self.page, "jobsdb_login_page.png")
@@ -447,8 +537,18 @@ class JobsDBAutomator:
             await email_field.fill(LOGIN_EMAIL)
             human_delay(0.5, 1.0)
         else:
-            print("  ⚠️ 未找到邮箱输入框，请手动填入邮箱", flush=True)
-            input(f"  请手动填入邮箱 {LOGIN_EMAIL} 后按 Enter 继续...")
+            # 未找到邮箱框 → UI-TARS 视觉兜底定位后填入；仍不行则提示在浏览器手动填
+            print("  ⚠️ 选择器未找到邮箱输入框，尝试 UI-TARS 兜底...", flush=True)
+            await self._click_smart(
+                self.page,
+                ["input[type='email']", "input[name='email']", "input[placeholder*='email' i]"],
+                "找到邮箱输入框并点击它（准备输入邮箱地址）。",
+                "jobsdb_email_field.png",
+            )
+            try:
+                await self.page.keyboard.type(LOGIN_EMAIL, delay=60)
+            except Exception:
+                print(f"  ⚠️ 请在浏览器页面手动填入邮箱 {LOGIN_EMAIL} 并提交（脚本会轮询等登录）", flush=True)
 
         # 步骤4：点 Continue/Submit
         await self._click_smart(
@@ -465,66 +565,27 @@ class JobsDBAutomator:
         human_delay(3.0, 5.0)
         await screenshot_page(self.page, "jobsdb_otp_page.png")
 
-        # 步骤5：暂停，等用户输入验证码
+        # 步骤5-8：等用户【在浏览器页面】输入验证码并提交，脚本轮询等登录成功。
+        # （改为轮询式，不用终端 input()，这样后台运行也可用，且 OTP 直接在网页输入更可靠）
         print("\n" + "=" * 60)
-        print("📧 验证码已发送到邮箱:", LOGIN_EMAIL)
-        print("   请查收邮件，找到 JobsDB 发来的验证码（一次性密码 OTP）")
+        print(f"📧 验证码已发送到邮箱: {LOGIN_EMAIL}")
+        print("   👉 请在【打开的浏览器页面】里输入邮件收到的验证码(OTP)并提交")
+        print("   脚本每 5 秒自动检测一次登录状态，最长等待 10 分钟...")
         print("=" * 60, flush=True)
-        otp_code = input("  请在此处输入验证码（直接粘贴后回车）: ").strip()
 
-        # 步骤6：填入验证码
-        # TODO: 调试时确认 OTP 输入框选择器（可能是多个单字符输入框）
-        otp_field = await self.page.query_selector(
-            "input[name='otp'], input[type='text'][maxlength='6'], "
-            "input[type='number'][maxlength='6'], "
-            "[data-automation='otp-input'], "
-            "input[autocomplete='one-time-code']"
-        )
-        if otp_field:
-            await otp_field.click()
-            human_delay(0.3, 0.7)
-            await otp_field.fill(otp_code)
-            human_delay(0.5, 1.0)
-        else:
-            # 可能是多个单字符输入框
-            # TODO: 调试时如果是多框，需特殊处理（逐字符填入）
-            print("  ⚠️ 未找到单一 OTP 输入框，尝试逐字符输入模式...", flush=True)
-            otp_fields = await self.page.query_selector_all(
-                "input[maxlength='1'], input[type='tel'][maxlength='1']"
-            )
-            if otp_fields and len(otp_fields) >= len(otp_code):
-                for i, char in enumerate(otp_code):
-                    await otp_fields[i].fill(char)
-                    human_delay(0.1, 0.3)
-            else:
-                print("  ⚠️ 无法自动填入验证码，请手动填入", flush=True)
-                input("  请手动填入验证码后按 Enter 继续...")
-
-        # 步骤7：提交验证码
-        await self._click_smart(
-            self.page,
-            [
-                "button[type='submit']",
-                "button:has-text('Verify')",
-                "button:has-text('Continue')",
-                "button:has-text('Sign in')",
-            ],
-            "找到提交验证码的按钮（Verify / Continue），点击它完成验证。",
-            "jobsdb_verify_btn.png",
-        )
-
-        # 步骤8：等待登录完成
-        print("  ⏳ 等待登录完成...", flush=True)
-        for i in range(24):  # 最多等 2 分钟
+        for i in range(120):  # 最多等 10 分钟
             await asyncio.sleep(5)
-            if await self._is_logged_in():
-                print("✅ 登录成功！", flush=True)
-                await screenshot_page(self.page, "jobsdb_logged_in.png")
-                return True
-            if i % 4 == 3:
-                print(f"  ⏳ 仍在等待登录... ({(i+1)*5}秒)", flush=True)
+            try:
+                if await self._is_logged_in():
+                    print("✅ 登录成功！", flush=True)
+                    await screenshot_page(self.page, "jobsdb_logged_in.png")
+                    return True
+            except Exception:
+                pass
+            if i % 6 == 5:
+                print(f"  ⏳ 仍在等待你输入验证码登录... ({(i+1)*5}秒)", flush=True)
 
-        print("⚠️ 等待登录超时（2分钟）", flush=True)
+        print("⚠️ 等待登录超时（10分钟）", flush=True)
         return False
 
     # ── 通用辅助 ──────────────────────────────────────────────────────────────────
@@ -1140,6 +1201,13 @@ class JobsDBAutomator:
             self._print_progress(stat)
             return "reject"
 
+        # dry-run 调试模式：判断通过即停，不点 Apply / 不填表单 / 不记录
+        if getattr(self, "dry_run", False):
+            print(f"  🧪 [dry-run] 本应申请（未实际点Apply/未填表单/未记录）: {company} | {title}", flush=True)
+            stat["would_apply"] = stat.get("would_apply", 0) + 1
+            self._print_progress(stat)
+            return "would_apply"
+
         # 检查 Apply 按钮（若无，跳过）
         # 回到职位卡片所在页面（若刚刚打开了详情页）
         # TODO: 调试时确认：打开详情页后是否需要 go_back() 才能点卡片上的 Apply
@@ -1304,11 +1372,14 @@ class JobsDBAutomator:
                     print(f"\n📑 最终统计 CSV 已生成: {csv_path}", flush=True)
                 except Exception as e:
                     print(f"[WARN] 导出 CSV 失败: {e}", flush=True)
-                print("\n🔚 关闭浏览器...", flush=True)
-                try:
-                    await self.context.close()
-                except Exception:
-                    pass
+                if self.connected_cdp:
+                    print("\n🔚 CDP 模式：保留你的 Chrome 不动（脚本退出即自动断开连接）", flush=True)
+                else:
+                    print("\n🔚 关闭浏览器...", flush=True)
+                    try:
+                        await self.context.close()
+                    except Exception:
+                        pass
 
 
 # ─── 命令行入口 ────────────────────────────────────────────────────────────────────
@@ -1362,6 +1433,15 @@ def _build_arg_parser():
         "--uitars-local-model", default=None,
         help="local 方式模型名称（GGUF 路径）。默认 None → 自动从 /v1/models 取第一个。",
     )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="试运行：登录+遍历+筛选+判断+打印，但不点Apply/不填表单/不记录，安全验证筛选逻辑。",
+    )
+    parser.add_argument(
+        "--cdp-url", default=None,
+        help="连接已运行的真实 Chrome（CDP），绕过 Cloudflare。需先用 "
+             "--remote-debugging-port=9222 启动 Chrome 并手动通过验证+登录。如 http://127.0.0.1:9222",
+    )
     return parser
 
 
@@ -1405,11 +1485,13 @@ def main():
     else:
         print(f"⚙️ UI-TARS 提供方式: openrouter", flush=True)
 
-    print(f"⚙️ UI-TARS 提供方式: {UITARS_PROVIDER}"
-          + (f" | endpoint: {UITARS_ENDPOINT}" if UITARS_PROVIDER == "remote" else ""),
-          flush=True)
+    if args.dry_run:
+        print("🧪 dry-run 试运行：登录+遍历+筛选+判断，不实际申请", flush=True)
 
-    asyncio.run(JobsDBAutomator().run())
+    automator = JobsDBAutomator(dry_run=args.dry_run)
+    if args.cdp_url:
+        automator.cdp_url = args.cdp_url
+    asyncio.run(automator.run())
 
 
 if __name__ == "__main__":
