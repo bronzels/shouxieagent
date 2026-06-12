@@ -63,8 +63,7 @@ UITARS_KEY = ""
 # 登录邮箱
 LOGIN_EMAIL = "bronzels@hotmail.com"
 
-# 默认薪资（无范围时填写，单位：港币/月）
-# TODO: 主人确认此处是月薪 40000 HKD（港币）还是其他单位/金额
+# 默认薪资（职位无薪资范围时填写）：月薪 40000 港币（已与主人确认为月薪）
 DEFAULT_SALARY_HKD = 40000
 
 # 持久化 profile 目录（独立于 zhipin，避免互相污染）
