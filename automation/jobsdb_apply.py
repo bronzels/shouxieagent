@@ -654,16 +654,40 @@ class JobsDBAutomator:
         print("📋 来源：Recommended（推荐职位）")
         print("=" * 60, flush=True)
 
-        await self.page.goto("https://hk.jobsdb.com/", wait_until="domcontentloaded", timeout=30000)
+        # 推荐列表只在首页根地址，总是先回首页（无论当前在哪个 jobsdb 页面）
+        await self.page.goto("https://hk.jobsdb.com/", wait_until="domcontentloaded", timeout=40000)
         human_delay(3.0, 5.0)
         await screenshot_page(self.page, "jobsdb_recommended_page.png")
 
-        # 滚动触发懒加载
+        # 滚动触发渲染（首页推荐封顶 100 个，实测无翻页/懒加载增量）
         for _ in range(3):
-            await self.page.mouse.wheel(0, 600)
+            await self.page.mouse.wheel(0, 800)
             human_delay(1.0, 2.0)
 
-        jobs = await self._extract_job_cards_from_page("Recommended")
+        # 推荐卡实测结构：a[data-automation^='recommendedJobLink'] 覆盖整卡，
+        # 卡内 [data-automation='jobTitle'] / [data-automation='jobAdvertiser']。
+        # href 是 DOM 真实链接（/job/<id>），非拼接。
+        raw = await self.page.evaluate(r"""() => {
+            const out=[];
+            for(const a of document.querySelectorAll("a[data-automation^='recommendedJobLink']")){
+                let card=a; for(let i=0;i<5;i++){ if(card.querySelector("[data-automation='jobTitle']"))break; card=card.parentElement; if(!card)break; }
+                if(!card) continue;
+                const tt=card.querySelector("[data-automation='jobTitle']");
+                const co=card.querySelector("[data-automation='jobAdvertiser']");
+                const applied=/applied/i.test(card.textContent||'');
+                out.push({title: tt?tt.textContent.trim():'', company: co?co.textContent.trim():'Unknown',
+                          href: a.getAttribute('href')||'', already_applied: applied});
+            }
+            return out;
+        }""")
+        jobs, seen = [], set()
+        for r in raw:
+            if not r.get("title") or not r.get("href") or r["href"] in seen:
+                continue
+            seen.add(r["href"])
+            jobs.append({"source": "Recommended", "title": r["title"], "company": r["company"],
+                         "salary": "", "already_applied": r["already_applied"],
+                         "detail_url": "https://hk.jobsdb.com" + r["href"]})
         print(f"  ✅ 推荐列表共抓取 {len(jobs)} 个职位", flush=True)
         return jobs
 
@@ -909,16 +933,17 @@ class JobsDBAutomator:
 
         # TODO: 调试时确认详情页 JD 正文选择器
         try:
-            await self.page.goto(detail_url, wait_until="domcontentloaded", timeout=20000)
-            human_delay(2.0, 3.5)
+            await self.page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
+            # 详情页 SPA 渲染较慢：等 JD 正文容器出现再读（实测正文容器为 jobAdDetails）
+            try:
+                await self.page.wait_for_selector("[data-automation='jobAdDetails']", timeout=15000)
+            except Exception:
+                pass
+            human_delay(1.5, 2.5)
             for sel in [
+                "[data-automation='jobAdDetails']",   # 实测确认的 JD 正文容器
                 "[data-automation='jobDescription']",
-                "[data-automation='job-description']",
-                ".job-description",
                 "[class*='JobDescription']",
-                "[class*='job-detail']",
-                "section[class*='description']",
-                "div[id*='description']",
             ]:
                 el = await self.page.query_selector(sel)
                 if el:
