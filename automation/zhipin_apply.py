@@ -322,7 +322,7 @@ async def call_uitars(image_path: str, task_prompt: str) -> str:
     return result["choices"][0]["message"]["content"]
 
 
-async def verify_job_is_it_remote(job_title: str, job_desc: str, image_path: str = None) -> tuple[bool, str]:
+async def verify_job_is_it_remote(job_title: str, job_desc: str, salary: str = "", image_path: str = None) -> tuple[bool, str]:
     """
     判断职位是否为「IT 软件/技术开发类」且「支持远程/WFH」。
     - 默认用免费纯文本模型 VERIFY_MODEL（以标题+正文为依据，中文足够）。
@@ -524,7 +524,16 @@ async def human_mouse_move_and_click(page: Page, x: int, y: int):
 # ─── 主要自动化逻辑 ───────────────────────────────────────────────────────────
 
 class BossZhipinAutomator:
-    def __init__(self):
+    def __init__(self, verify_fn=None):
+        """
+        verify_fn: 职位判断函数，签名为 async (title, desc, salary="") -> (bool, str)
+                   默认为 None，此时 apply_to_job 使用模块级 verify_job_is_it_remote。
+                   通过注入不同的 verify_fn，同一个 Automator 可服务：
+                     - 远程岗任务（verify_job_is_it_remote）
+                     - 大模型深圳任务（verify_damoxing_sz）
+                     - 职位 tab 混合任务（verify_mixed）
+        """
+        self.verify_fn = verify_fn  # 可注入的职位判断函数
         self.applied_data = load_applied_jobs()
         self.status_data = zhipin_status.load_status()  # 对方回应状态（apply前过滤）
         self.page: Page = None
@@ -928,15 +937,29 @@ class BossZhipinAutomator:
                 if len(desc2) > len(desc):
                     desc = desc2
 
+            # 选择职位判断函数：优先用注入的 verify_fn，未注入则用默认的远程判断
+            _verify = self.verify_fn or verify_job_is_it_remote
+            salary = job.get("salary", "")
+
             # 判断：正文够长 → 纯文本免费模型；正文仍抓不到 → 截图+免费多模态兜底
+            # 注意：verify_job_is_it_remote 支持可选的 image_path 参数（多模态兜底）；
+            # 自定义 verify_fn 签名为 (title, desc, salary="")，不接受 image_path，
+            # 所以多模态截图兜底仅对默认远程判断函数生效。
             if len(desc) >= MIN_DESC_LEN:
-                should_apply, reason = await verify_job_is_it_remote(title, desc)
+                should_apply, reason = await _verify(title, desc, salary)
                 model_used = "纯文本"
             else:
-                shot_path = await screenshot_page(self.page, f"job_{safe}.png")
-                print(f"  ⚠️ 正文抓取不足({len(desc)}字)，降级用免费多模态+截图判断")
-                should_apply, reason = await verify_job_is_it_remote(title, desc, shot_path)
-                model_used = "多模态"
+                if _verify is verify_job_is_it_remote:
+                    # 默认远程判断函数支持截图兜底
+                    shot_path = await screenshot_page(self.page, f"job_{safe}.png")
+                    print(f"  ⚠️ 正文抓取不足({len(desc)}字)，降级用免费多模态+截图判断")
+                    should_apply, reason = await verify_job_is_it_remote(title, desc, shot_path)
+                    model_used = "多模态"
+                else:
+                    # 自定义 verify_fn：正文不足时仍调用，但不传截图
+                    print(f"  ⚠️ 正文抓取不足({len(desc)}字)，使用自定义判断函数（无截图兜底）")
+                    should_apply, reason = await _verify(title, desc, salary)
+                    model_used = "纯文本(正文不足)"
 
             verdict = "✅ 投递" if should_apply else "❌ 跳过"
             print(f"  🤖 判断[{verdict}]({model_used}): {reason[:160].replace(chr(10), ' ')}")

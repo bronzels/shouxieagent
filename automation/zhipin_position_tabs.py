@@ -1,0 +1,458 @@
+# -*- coding: utf-8 -*-
+"""
+Boss直聘自动投递 - 首页职位Tab专项任务
+
+任务：点击首页「职位」按钮进入职位列表页，遍历以下 tab：
+  - 机器学习（处理）
+  - 算法工程师（处理）
+  - 数据架构师（跳过，不投递）
+
+对每个职位使用混合判断（verify_mixed）：
+  - 远程岗 → verify_job_is_it_remote
+  - 深圳岗 → verify_damoxing_sz（从 zhipin_damoxing_sz import）
+  - 两者都不是 → 跳过
+
+复用：BossZhipinAutomator（全部基础设施共享）。
+通过注入 verify_fn=verify_mixed 实现定制判断。
+
+注意：Boss直聘首页「职位」按钮及其 tab 选择器以下为最佳猜测，
+      需要在调试时用真实浏览器页面确认（搜索 TODO-SELECTOR 标记）。
+      所有不确定的选择器都已用 _click_smart（UI-TARS视觉兜底）包装，
+      确保即使选择器失效也能通过 UI-TARS 视觉定位正常运行。
+"""
+
+import asyncio
+import os
+from pathlib import Path
+
+# 从 .env 文件加载环境变量（与 zhipin_apply.py 保持一致）
+_env_file = Path(__file__).parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
+
+# ─── 复用 zhipin_apply 的核心组件 ─────────────────────────────────────────────
+from zhipin_apply import (
+    BossZhipinAutomator,
+    verify_job_is_it_remote,
+    CITY_CODES,
+    human_delay,
+    screenshot_page,
+    export_applications_csv,
+    save_applied_jobs,
+    DELAY_MIN,
+    DELAY_MAX,
+)
+
+# ─── 复用大模型深圳的判断函数 ─────────────────────────────────────────────────
+from zhipin_damoxing_sz import verify_damoxing_sz
+
+# ─── 配置 ─────────────────────────────────────────────────────────────────────
+
+SHENZHEN_CITY_CODE = CITY_CODES["深圳"]  # "101280600"
+
+# 要处理的 tab 名称（跳过「数据架构师」）
+TABS_TO_PROCESS = ["机器学习", "算法工程师"]
+# 明确跳过的 tab
+TABS_TO_SKIP = ["数据架构师"]
+
+# 首页职位按钮 URL（Boss直聘职位推荐/列表页，不含搜索关键字）
+# TODO-SELECTOR: 需真实浏览器确认此 URL 是否是首页点「职位」后的落地页
+ZHIPIN_JOBS_HOME = "https://www.zhipin.com/web/geek/jobs"
+
+
+def _is_remote_job(title: str, desc: str, location: str) -> bool:
+    """
+    快速判断是否是远程岗（用于 verify_mixed 预筛选）。
+    远程岗特征：标题或描述中包含"远程""可远程""WFH""居家办公""在家办公"。
+    """
+    keywords = ["远程", "可远程", "WFH", "wfh", "居家办公", "在家办公"]
+    combined = f"{title} {desc} {location}"
+    return any(kw in combined for kw in keywords)
+
+
+def _is_shenzhen_job(location: str, desc: str) -> bool:
+    """
+    快速判断是否是深圳岗（用于 verify_mixed 预筛选）。
+    深圳岗特征：location 包含"深圳"。
+    """
+    return "深圳" in (location or "") or "深圳" in (desc[:200] or "")
+
+
+async def verify_mixed(
+    title: str,
+    desc: str,
+    salary: str = "",
+    location: str = "",
+) -> tuple[bool, str]:
+    """
+    混合判断函数：根据职位地点/描述是否为远程或深圳，选择对应的 verify 函数。
+    - 远程岗 → verify_job_is_it_remote（title, desc, salary）
+    - 深圳岗 → verify_damoxing_sz（title, desc, salary，需满足30K硬条件）
+    - 两者都不是 → 跳过（返回 False）
+
+    注意：一个职位可能同时满足"远程+深圳"（深圳的远程岗），
+    此时优先走 verify_job_is_it_remote（能投就投）。
+    """
+    is_remote = _is_remote_job(title, desc, location)
+    is_sz = _is_shenzhen_job(location, desc)
+
+    if is_remote:
+        should, reason = await verify_job_is_it_remote(title, desc, salary)
+        return should, f"[远程岗路径] {reason}"
+
+    if is_sz:
+        should, reason = await verify_damoxing_sz(title, desc, salary)
+        return should, f"[深圳大模型路径] {reason}"
+
+    # 既不是远程也不是深圳
+    return False, f"[跳过] 既非远程岗也非深圳岗（location={location!r}）"
+
+
+# ─── verify_mixed 的包装器：适配 apply_to_job 的 (title, desc, salary) 签名 ──
+# apply_to_job 调用 self.verify_fn(title, desc, salary)，不传 location。
+# 但 verify_mixed 需要 location 来判断。
+# 解决方案：在 PositionTabsAutomator 中重写 apply_to_job，从 job dict 取 location，
+# 传给 verify_mixed_with_location（见下方）。
+# 这样无需修改 BossZhipinAutomator.apply_to_job 的签名，保持向后兼容。
+
+async def _verify_mixed_no_location(title: str, desc: str, salary: str = "") -> tuple[bool, str]:
+    """
+    无 location 参数的 verify_mixed 适配器（供 apply_to_job 的 verify_fn 签名使用）。
+    在没有 location 信息时，仅依赖标题和描述中的关键字判断是否远程/深圳。
+    """
+    return await verify_mixed(title, desc, salary, location="")
+
+
+# ─── 职位 Tab 专项 Automator ──────────────────────────────────────────────────
+
+class PositionTabsAutomator(BossZhipinAutomator):
+    """
+    首页职位Tab专项投递。
+    复用 BossZhipinAutomator 全部基础设施。
+    通过注入 verify_fn=_verify_mixed_no_location 实现混合判断。
+    覆盖：
+      - navigate_to_jobs_home()：导航到职位列表首页
+      - click_tab()：点击指定 tab
+      - process_tab()：处理单个 tab 的全部职位
+      - run()：主流程（遍历 tab，跳过数据架构师）
+    """
+
+    def __init__(self):
+        super().__init__(verify_fn=_verify_mixed_no_location)
+
+    async def navigate_to_jobs_home(self) -> bool:
+        """
+        导航到 Boss直聘「职位」列表首页（不含搜索关键字，显示推荐职位列表）。
+
+        方式一（直接导航URL）：直接访问 ZHIPIN_JOBS_HOME。
+        方式二（点击导航栏职位按钮）：如果直接URL失败，回退到首页后点「职位」按钮。
+
+        TODO-SELECTOR: 以下导航栏「职位」按钮选择器为最佳猜测，需真实页面确认。
+        候选选择器：
+          - ".nav-main a:has-text('职位')"  ← 主导航区包含"职位"的链接
+          - "a[href*='/web/geek/jobs']"      ← 指向职位页的链接
+          - ".header-nav a:has-text('职位')"
+          - "nav a:has-text('职位')"
+        """
+        print(f"  导航到职位列表首页: {ZHIPIN_JOBS_HOME}")
+        try:
+            await self.page.goto(ZHIPIN_JOBS_HOME, wait_until="domcontentloaded", timeout=30000)
+            human_delay(3.0, 5.0)
+            # 检查是否有职位卡或 tab 区域（说明导航成功）
+            try:
+                await self.page.wait_for_selector(
+                    # TODO-SELECTOR: 职位列表页可能有 .job-card-box 或 tab 区域
+                    ".job-card-box, [class*='tab'], [class*='category']",
+                    timeout=10000
+                )
+            except Exception:
+                pass
+            # 尝试截图确认页面状态
+            await screenshot_page(self.page, "position_tabs_home.png")
+            print("  已导航到职位首页")
+            return True
+        except Exception as e:
+            print(f"  [WARN] 直接导航失败，尝试从首页点击职位按钮: {e}")
+
+        # 回退方式：先回首页，再点「职位」按钮
+        try:
+            await self.page.goto("https://www.zhipin.com/", wait_until="domcontentloaded", timeout=30000)
+            human_delay(2.0, 3.0)
+        except Exception:
+            return False
+
+        # TODO-SELECTOR: 以下为导航栏「职位」按钮的候选选择器，需真实页面确认
+        clicked = await self._click_smart(
+            self.page,
+            [
+                ".nav-main a:has-text('职位')",         # TODO-SELECTOR: 候选1
+                "a[href*='/web/geek/jobs']",             # TODO-SELECTOR: 候选2
+                ".header-nav a:has-text('职位')",        # TODO-SELECTOR: 候选3
+                "nav a:has-text('职位')",                # TODO-SELECTOR: 候选4
+            ],
+            "找到页面顶部导航栏中的「职位」按钮，点击它进入职位列表页。",
+            "nav_jobs_btn.png",
+        )
+        if not clicked:
+            print("  [WARN] 未能找到并点击「职位」导航按钮")
+            return False
+
+        human_delay(3.0, 5.0)
+        await screenshot_page(self.page, "position_tabs_home_fallback.png")
+        return True
+
+    async def click_tab(self, tab_name: str) -> bool:
+        """
+        点击职位列表页中的指定 tab（如「机器学习」「算法工程师」）。
+
+        Boss直聘职位列表页顶部有分类 tab 栏，
+        各 tab 名称为职位类别（如「机器学习」「算法工程师」「数据架构师」等）。
+
+        TODO-SELECTOR: 以下 tab 选择器为最佳猜测，需真实页面确认。
+        Boss直聘职位 tab 的可能 HTML 结构（待确认）：
+          <ul class="tab-list">
+            <li class="tab-item active">机器学习</li>
+            <li class="tab-item">算法工程师</li>
+            <li class="tab-item">数据架构师</li>
+          </ul>
+        候选选择器：
+          - ".tab-list .tab-item"                    ← tab列表项
+          - "[class*='tab'] li"                      ← 泛化tab项
+          - ".category-list .category-item"          ← 分类列表
+          - "[class*='category'] [class*='item']"    ← 泛化分类项
+        """
+        print(f"  点击 tab: 【{tab_name}】")
+
+        # TODO-SELECTOR: 以下选择器为最佳猜测，调试时需在真实页面确认
+        clicked = await self._click_smart(
+            self.page,
+            [
+                ".tab-list .tab-item",                  # TODO-SELECTOR: 候选1
+                "[class*='tab-list'] [class*='tab-item']",  # TODO-SELECTOR: 候选2
+                ".category-list .category-item",        # TODO-SELECTOR: 候选3
+                "[class*='category'] [class*='item']",  # TODO-SELECTOR: 候选4
+                "[class*='tab'] li",                    # TODO-SELECTOR: 候选5
+                "li[class*='tab']",                     # TODO-SELECTOR: 候选6
+            ],
+            f"找到职位列表页顶部的分类tab栏，点击名为「{tab_name}」的tab按钮。",
+            f"tab_click_{tab_name}.png",
+            require_text=tab_name,
+        )
+        if not clicked:
+            print(f"  [WARN] 未能点击 tab: {tab_name}")
+            return False
+
+        human_delay(2.0, 4.0)
+        # 等待 tab 内容加载（职位卡出现）
+        try:
+            await self.page.wait_for_selector(".job-card-box", timeout=8000)
+        except Exception:
+            pass
+        await screenshot_page(self.page, f"tab_{tab_name}_loaded.png")
+        n = len(await self.page.query_selector_all(".job-card-box"))
+        print(f"  tab【{tab_name}】加载完成，当前页 {n} 个职位")
+        return True
+
+    async def scroll_to_load_more(self) -> int:
+        """
+        在 tab 内滚动到底部以加载更多职位（如果是无限滚动而非分页）。
+        返回滚动后的职位总数。
+
+        TODO-SELECTOR: 需确认职位 tab 列表是分页还是无限滚动。
+        - 如果是分页：需要找「下一页」按钮并点击（参考 goto_list 方式）。
+        - 如果是无限滚动：滚动到底部即可加载更多。
+        当前实现按无限滚动处理（滚动3次）。
+        """
+        for _ in range(3):
+            await self.page.mouse.wheel(0, 800)
+            human_delay(1.5, 2.5)
+        n = len(await self.page.query_selector_all(".job-card-box"))
+        return n
+
+    async def process_tab(self, tab_name: str) -> dict:
+        """
+        处理单个 tab 内的全部职位：
+        1. 点击 tab
+        2. 滚动加载更多（如果是无限滚动）
+        3. 逐个职位调用 apply_to_job（注入了 verify_mixed，自动判断远程/深圳路径）
+        """
+        print(f"\n  {'='*50}")
+        print(f"  处理 tab：【{tab_name}】")
+        print(f"  {'='*50}")
+
+        stat = {"tab": tab_name, "checked": 0, "applied": 0, "reject": 0,
+                "dup": 0, "contacted": 0, "fail": 0, "blocked": 0}
+
+        # 点击 tab
+        if not await self.click_tab(tab_name):
+            print(f"  [WARN] tab【{tab_name}】点击失败，跳过本 tab")
+            return stat
+
+        # 加载职位列表（滚动或等待）
+        await self.scroll_to_load_more()
+
+        # 获取职位列表（复用 get_job_listings）
+        jobs = await self.get_job_listings()
+        if not jobs:
+            print(f"  tab【{tab_name}】无职位，跳过")
+            return stat
+
+        print(f"  tab【{tab_name}】共 {len(jobs)} 个职位，逐个检查...")
+        for job in jobs:
+            # apply_to_job 会调用 self.verify_fn（即 _verify_mixed_no_location）
+            # _verify_mixed_no_location 根据标题+描述中的关键字判断远程/深圳路径
+            status = await self.apply_to_job(job, f"tab-{tab_name}")
+            stat["checked"] += 1
+            if status in stat:
+                stat[status] += 1
+            skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
+            print(f"     [tab {tab_name}] 检查 {stat['checked']} | "
+                  f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")
+            human_delay(DELAY_MIN, DELAY_MAX)
+
+        # tab 阶段总结
+        skipped_total = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
+        print(f"\n  tab【{tab_name}】总结：检查 {stat['checked']} | "
+              f"投递 {stat['applied']} | 跳过 {skipped_total} | 失败 {stat['fail']}")
+        return stat
+
+    async def run(self):
+        """职位Tab专项主运行入口"""
+        import zhipin_apply as za
+        if not za.OPENROUTER_API_KEY:
+            raise ValueError(
+                "缺少 OPENROUTER_API_KEY！\n"
+                "请在 automation/.env 中设置：OPENROUTER_API_KEY=sk-or-v1-xxx"
+            )
+
+        print("\n" + "🤖 " * 20)
+        print("Boss直聘自动投递 — 首页职位Tab专项 启动")
+        print(f"将处理 tab：{TABS_TO_PROCESS}（跳过：{TABS_TO_SKIP}）")
+        print("🤖 " * 20 + "\n")
+
+        from rebrowser_playwright.async_api import async_playwright
+        async with async_playwright() as playwright:
+            await self.start_browser(playwright)
+
+            try:
+                await self.navigate_to_zhipin()
+                logged_in = await self.check_login_and_wait()
+                if not logged_in:
+                    print("未能登录，终止运行")
+                    return
+
+                # 导航到职位列表首页
+                if not await self.navigate_to_jobs_home():
+                    print("未能导航到职位列表首页，终止运行")
+                    return
+
+                all_stats = []
+                for tab_name in TABS_TO_PROCESS:
+                    st = await self.process_tab(tab_name)
+                    all_stats.append(st)
+                    # tab 间休息
+                    import random
+                    rest = random.uniform(3.0, 6.0)
+                    print(f"\n  tab 间休息 {rest:.1f}s...")
+                    await asyncio.sleep(rest)
+
+                # 全部 tab 汇总
+                print("\n" + "█" * 60)
+                print("首页职位Tab专项 — 全部 tab 处理完毕")
+                print("█" * 60)
+                tot = {"checked": 0, "applied": 0, "reject": 0,
+                       "dup": 0, "contacted": 0, "fail": 0, "blocked": 0}
+                print(f"  {'tab':<12}{'检查':>6}{'投递':>6}{'不符合':>7}{'已投':>6}{'失败':>6}")
+                for st in all_stats:
+                    for k in tot:
+                        tot[k] += st.get(k, 0)
+                    print(f"  {st['tab']:<12}{st['checked']:>6}{st['applied']:>6}"
+                          f"{st['reject']:>7}{st['dup']:>6}{st['fail']:>6}")
+                print(f"  {'─' * 46}")
+                print(f"  {'合计':<12}{tot['checked']:>6}{tot['applied']:>6}"
+                      f"{tot['reject']:>7}{tot['dup']:>6}{tot['fail']:>6}")
+
+            except KeyboardInterrupt:
+                print("\n用户中断，保存当前进度...")
+                save_applied_jobs(self.applied_data)
+
+            finally:
+                try:
+                    save_applied_jobs(self.applied_data)
+                    csv_path = export_applications_csv(self.applied_data)
+                    print(f"最终统计CSV已生成: {csv_path}")
+                except Exception as e:
+                    print(f"[WARN] 导出CSV失败: {e}")
+                print("\n关闭浏览器...")
+                try:
+                    await self.context.close()
+                except Exception:
+                    pass
+
+
+# ─── 入口 ─────────────────────────────────────────────────────────────────────
+
+def _build_arg_parser():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Boss直聘自动投递 - 首页职位Tab专项（机器学习/算法工程师；混合判断远程+深圳）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例：
+  # 使用 .env 中的 OpenRouter key
+  python automation/zhipin_position_tabs.py
+
+  # 命令行传入 key
+  python automation/zhipin_position_tabs.py --openrouter-key sk-or-v1-xxx
+
+  # 指定 UI-TARS 为 remote 方式（UI-TARS兜底点击将走remote endpoint）
+  python automation/zhipin_position_tabs.py \\
+    --uitars-provider remote \\
+    --uitars-endpoint https://xxxx.ngrok.io/v1/chat/completions \\
+    --uitars-key super-secret-key
+
+注意：首页「职位」按钮和 tab 选择器为最佳猜测，
+      首次运行时请观察浏览器行为，如选择器失效将自动触发 UI-TARS 视觉兜底。
+      所有 TODO-SELECTOR 标记处均需在真实页面确认后更新。
+        """,
+    )
+    parser.add_argument("--openrouter-key", default=None,
+                        help="OpenRouter API key（优先级高于环境变量/env文件）")
+    parser.add_argument("--uitars-provider", choices=["openrouter", "remote", "local"],
+                        default="openrouter", help="UI-TARS 提供方式（默认 openrouter）")
+    parser.add_argument("--uitars-endpoint", default=None,
+                        help="remote 方式下 UI-TARS endpoint URL")
+    parser.add_argument("--uitars-key", default=None,
+                        help="remote 方式下 UI-TARS x-api-key 鉴权 key")
+    return parser
+
+
+def main():
+    import zhipin_apply as za
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    if args.openrouter_key:
+        za.OPENROUTER_API_KEY = args.openrouter_key
+    za.UITARS_PROVIDER = args.uitars_provider
+    if args.uitars_key:
+        za.UITARS_KEY = args.uitars_key
+    if args.uitars_endpoint:
+        za.UITARS_ENDPOINT = args.uitars_endpoint
+
+    if za.UITARS_PROVIDER == "remote" and not za.UITARS_ENDPOINT:
+        parser.error("--uitars-provider remote 需要同时指定 --uitars-endpoint")
+
+    print(f"UI-TARS 提供方式: {za.UITARS_PROVIDER}"
+          + (f" | endpoint: {za.UITARS_ENDPOINT}" if za.UITARS_PROVIDER == "remote" else ""),
+          flush=True)
+
+    asyncio.run(PositionTabsAutomator().run())
+
+
+if __name__ == "__main__":
+    main()
