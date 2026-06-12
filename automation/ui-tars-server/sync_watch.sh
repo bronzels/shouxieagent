@@ -11,9 +11,13 @@ LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 # 排除项：不同步 models（大文件）、pycache、临时文件
 EXCLUDES=(
     --exclude="models/"
+    --exclude=".venv/"
+    --exclude=".ms_cache/"
     --exclude="__pycache__/"
     --exclude="*.pyc"
     --exclude=".git/"
+    --exclude="docker-build.log"
+    --exclude="download.log"
 )
 
 do_sync() {
