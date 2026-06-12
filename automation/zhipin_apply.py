@@ -34,6 +34,8 @@ import pyautogui
 # Boss直聘的反爬 JS 会检测原版 Playwright 的 CDP 痕迹并把页面跳转到 about:blank。
 from rebrowser_playwright.async_api import async_playwright, Page, Browser
 
+import zhipin_status  # 对方回应状态过滤（所有 apply 任务共享）
+
 # ─── 配置 ────────────────────────────────────────────────────────────────────
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -524,6 +526,7 @@ async def human_mouse_move_and_click(page: Page, x: int, y: int):
 class BossZhipinAutomator:
     def __init__(self):
         self.applied_data = load_applied_jobs()
+        self.status_data = zhipin_status.load_status()  # 对方回应状态（apply前过滤）
         self.page: Page = None
         self.browser: Browser = None
         self.context = None
@@ -890,6 +893,13 @@ class BossZhipinAutomator:
             print(f"  ⏭️  [跳过-已投递] {company} | {title}")
             return "dup"
 
+        # 对方回应状态过滤：已读不回/拒绝/索要简历/已发简历 → 跳过，不浪费打招呼次数
+        # （即使 zhipin 2 个月限制解除仍跳过；状态由 zhipin_messages.py 扫描写入）
+        if zhipin_status.is_blocked(self.status_data, company, title):
+            st = zhipin_status.get_status(self.status_data, company, title)
+            print(f"  ⏭️  [跳过-对方已回应:{st}] {company} | {title}")
+            return "blocked"
+
         print(f"\n  🔎 检查职位: {company} | {title}")
         print(f"     薪资: {job.get('salary', 'N/A')} | 地点: {job.get('location','')} | 标签: {', '.join(job.get('tags', []))}")
 
@@ -987,11 +997,11 @@ class BossZhipinAutomator:
         if is_city_completed(self.applied_data, city):
             print(f"  ⏭️ 城市 [{city}] 之前已处理完成，跳过")
             return {"city": city, "checked": 0, "applied": 0, "reject": 0,
-                    "dup": 0, "contacted": 0, "fail": 0, "skipped": True}
+                    "dup": 0, "contacted": 0, "fail": 0, "blocked": 0, "skipped": True}
 
         # 本城市统计
         stat = {"city": city, "checked": 0, "applied": 0, "reject": 0,
-                "dup": 0, "contacted": 0, "fail": 0, "skipped": False}
+                "dup": 0, "contacted": 0, "fail": 0, "blocked": 0, "skipped": False}
 
         # 列表页逐页投递（直接用城市码导航列表页，并读 .city-label 确认城市；
         # 地图选城市的 switch_city_via_map 已保留但不在主流程调用——列表页
@@ -1022,8 +1032,9 @@ class BossZhipinAutomator:
                 if status in stat:
                     stat[status] += 1
                 # 实时累计进度提示
+                skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
                 print(f"     ▸ [{city}] 进度：检查 {stat['checked']} | "
-                      f"投递 {stat['applied']} | 跳过 {stat['reject']+stat['dup']+stat['contacted']} | 失败 {stat['fail']}")
+                      f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")
                 human_delay(DELAY_MIN, DELAY_MAX)
 
             page_num += 1
@@ -1033,11 +1044,11 @@ class BossZhipinAutomator:
             mark_city_completed(self.applied_data, city)
 
         # 城市阶段总结
-        skipped_total = stat["reject"] + stat["dup"] + stat["contacted"]
+        skipped_total = stat["reject"] + stat["dup"] + stat["contacted"] + stat["blocked"]
         print(f"\n  {'─'*54}")
         print(f"  🏁 城市 [{city}] 阶段总结：")
         print(f"     共检查 {stat['checked']} 个职位 → ✅ 投递 {stat['applied']} | "
-              f"⏭️ 跳过 {skipped_total}（不符合{stat['reject']}/已投{stat['dup']}/已沟通{stat['contacted']}）| "
+              f"⏭️ 跳过 {skipped_total}（不符合{stat['reject']}/已投{stat['dup']}/已沟通{stat['contacted']}/对方已回应{stat['blocked']}）| "
               f"⚠️ 失败 {stat['fail']}")
         print(f"  {'─'*54}")
         return stat
@@ -1091,8 +1102,9 @@ class BossZhipinAutomator:
                 print("\n" + "█"*60)
                 print("📊 全部城市处理完毕 —— 总汇总")
                 print("█"*60)
-                tot = {"checked": 0, "applied": 0, "reject": 0, "dup": 0, "contacted": 0, "fail": 0}
-                print(f"  {'城市':<6}{'检查':>6}{'投递':>6}{'不符合':>7}{'已投':>6}{'已沟通':>7}{'失败':>6}")
+                tot = {"checked": 0, "applied": 0, "reject": 0, "dup": 0,
+                       "contacted": 0, "fail": 0, "blocked": 0}
+                print(f"  {'城市':<6}{'检查':>6}{'投递':>6}{'不符合':>7}{'已投':>6}{'已沟通':>7}{'已回应':>7}{'失败':>6}")
                 for st in city_stats:
                     if st.get("skipped"):
                         print(f"  {st['city']:<6}{'(本次跳过-之前已完成)':>30}")
@@ -1100,12 +1112,12 @@ class BossZhipinAutomator:
                     for k in tot:
                         tot[k] += st.get(k, 0)
                     print(f"  {st['city']:<6}{st['checked']:>6}{st['applied']:>6}"
-                          f"{st['reject']:>7}{st['dup']:>6}{st['contacted']:>7}{st['fail']:>6}")
-                print(f"  {'─'*52}")
+                          f"{st['reject']:>7}{st['dup']:>6}{st['contacted']:>7}{st['blocked']:>7}{st['fail']:>6}")
+                print(f"  {'─'*58}")
                 print(f"  {'合计':<6}{tot['checked']:>6}{tot['applied']:>6}"
-                      f"{tot['reject']:>7}{tot['dup']:>6}{tot['contacted']:>7}{tot['fail']:>6}")
+                      f"{tot['reject']:>7}{tot['dup']:>6}{tot['contacted']:>7}{tot['blocked']:>7}{tot['fail']:>6}")
                 print(f"\n  本次共检查 {tot['checked']} 个职位 → 投递 {tot['applied']} | "
-                      f"跳过 {tot['reject']+tot['dup']+tot['contacted']} | 失败 {tot['fail']}")
+                      f"跳过 {tot['reject']+tot['dup']+tot['contacted']+tot['blocked']} | 失败 {tot['fail']}")
 
                 # 汇总报告
                 print("\n" + "="*60)
