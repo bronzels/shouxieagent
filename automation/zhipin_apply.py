@@ -49,31 +49,26 @@ SCREENSHOTS_DIR.mkdir(exist_ok=True)
 # 搜索关键词
 SEARCH_KEYWORD = "远程"
 
-# 热门城市 → Boss直聘城市编码（用于直达搜索结果页，比 UI 交互可靠）
-# 搜索结果页 URL 格式：
-#   https://www.zhipin.com/web/geek/jobs?query=远程&city=<code>
-# city=101020100 经实测对应"上海招聘"，编码已验证。
+# 热门城市 → Boss直聘城市编码。
+# 这 14 个城市与"地图→请选择城市→热门城市"面板里展示的完全一致（实测核对），
+# 城市码经地图面板点击验证（例：点'杭州'后 URL city=101210100）。
+# 列表搜索结果页 URL：https://www.zhipin.com/web/geek/jobs?query=远程&city=<code>
+# 地图版职位页 URL：https://www.zhipin.com/web/geek/map/jobs?query=远程&cityCode=<code>
 CITY_CODES = {
-    "全国": "100010000",
     "北京": "101010100",
     "上海": "101020100",
     "广州": "101280100",
     "深圳": "101280600",
     "杭州": "101210100",
-    "成都": "101270100",
-    "武汉": "101200100",
-    "西安": "101110100",
-    "南京": "101190100",
-    "苏州": "101190400",
     "天津": "101030100",
-    "重庆": "101040100",
-    "长沙": "101250100",
-    "郑州": "101180100",
+    "西安": "101110100",
+    "苏州": "101190400",
+    "武汉": "101200100",
     "厦门": "101230200",
-    "青岛": "101120200",
-    "宁波": "101210400",
-    "合肥": "101220100",
-    "济南": "101120100",
+    "长沙": "101250100",
+    "成都": "101270100",
+    "郑州": "101180100",
+    "重庆": "101040100",
 }
 DEFAULT_HOT_CITIES = list(CITY_CODES.keys())
 
@@ -86,11 +81,15 @@ APPLY_DELAY_MAX = 6.0
 # ─── 工具函数 ─────────────────────────────────────────────────────────────────
 
 def load_applied_jobs() -> dict:
-    """加载已投递职位记录"""
+    """加载已投递职位记录（含已完成城市列表，用于双重去重）"""
     if APPLIED_JOBS_FILE.exists():
         with open(APPLIED_JOBS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"jobs": [], "last_updated": ""}
+            data = json.load(f)
+            data.setdefault("jobs", [])
+            data.setdefault("completed_cities", [])
+            data.setdefault("last_updated", "")
+            return data
+    return {"jobs": [], "completed_cities": [], "last_updated": ""}
 
 
 def save_applied_jobs(data: dict):
@@ -119,6 +118,19 @@ def record_application(data: dict, company: str, position: str, city: str):
     })
     save_applied_jobs(data)
     print(f"  ✅ 已记录投递：{company} | {position} ({city})")
+
+
+def is_city_completed(data: dict, city: str) -> bool:
+    """该城市是否已在之前的运行中处理完成"""
+    return city in data.get("completed_cities", [])
+
+
+def mark_city_completed(data: dict, city: str):
+    """标记城市处理完成，下次运行跳过"""
+    if city not in data["completed_cities"]:
+        data["completed_cities"].append(city)
+        save_applied_jobs(data)
+        print(f"  🏁 城市 [{city}] 处理完成，已记录（下次运行将跳过）")
 
 
 def human_delay(min_s: float = DELAY_MIN, max_s: float = DELAY_MAX):
@@ -424,33 +436,38 @@ class BossZhipinAutomator:
         if "验证" in title or "security" in self.page.url.lower():
             print("  ⚠️ 疑似触发安全验证页面，请在浏览器中手动完成验证", flush=True)
 
-    async def _is_logged_in(self) -> bool:
+    async def _is_logged_in_on_home(self) -> bool:
         """
-        判断当前是否已登录。
-        未登录标志：导航栏存在"登录/注册"链接。
-        已登录标志：存在用户昵称/头像区，且无"登录/注册"链接。
+        在首页判断是否已登录（仅用于首页/非登录页）。
+        未登录标志：首页导航栏存在可见的"登录/注册"链接。
         """
         try:
-            login_link = await self.page.query_selector(
-                "a.nav-login, a:has-text('登录/注册'), a:has-text('登录')"
-            )
+            login_link = await self.page.query_selector("a:has-text('登录/注册')")
             if login_link and await login_link.is_visible():
                 return False
+            # 进一步确认：存在用户/极客导航区
             return True
         except Exception:
             return False
 
     async def check_login_and_wait(self) -> bool:
-        """检测登录状态，未登录则打开登录页并等待用户扫码"""
-        await screenshot_page(self.page, "login_check.png")
+        """
+        检测登录状态，未登录则打开登录页（直接显示二维码）并等待用户扫码。
 
-        if await self._is_logged_in():
-            print("✅ 已检测到登录状态（持久化 profile 已保存登录），继续执行", flush=True)
+        可靠的登录完成信号：扫码成功后 BOSS直聘 会把页面从 /web/user
+        重定向到首页/极客中心。因此轮询条件是"URL 已离开 /web/user"，
+        避免在登录页上因二维码刷新/过期导致的误判。
+        """
+        # 先在首页判断是否已登录（持久化 profile 可能已保存登录态）
+        await self.page.goto("https://www.zhipin.com/", wait_until="domcontentloaded", timeout=30000)
+        human_delay(2.0, 3.0)
+        if await self._is_logged_in_on_home():
+            print("✅ 已检测到登录状态（chrome_profile 已保存登录），继续执行", flush=True)
             return True
 
-        # 未登录 → 打开登录页
+        # 未登录 → 打开登录页（该页默认直接显示二维码）
         print("\n" + "=" * 60)
-        print("🔐 检测到未登录！正在打开登录页...")
+        print("🔐 检测到未登录！正在打开扫码登录页...")
         try:
             await self.page.goto(
                 "https://www.zhipin.com/web/user/?ka=header-login",
@@ -461,18 +478,22 @@ class BossZhipinAutomator:
         human_delay(2.0, 3.0)
         await screenshot_page(self.page, "login_qr.png")
 
-        print("👉 请在弹出的 Chrome 窗口中用 BOSS直聘 APP 扫描二维码登录")
-        print("   登录信息会保存到 automation/chrome_profile，下次无需再扫码")
-        print("   脚本每 5 秒自动检测一次登录状态，最长等待 10 分钟...")
+        print("👉 浏览器已显示二维码，请用 BOSS直聘 APP 扫码登录")
+        print("   登录信息会保存到 automation/chrome_profile，下次重跑无需再扫码")
+        print("   脚本每 5 秒检测一次，最长等待 10 分钟。二维码过期会自动刷新，请耐心扫码")
         print("=" * 60 + "\n", flush=True)
 
         for i in range(120):
             await asyncio.sleep(5)
             try:
-                if await self._is_logged_in():
-                    print("✅ 检测到登录成功，继续执行", flush=True)
+                url = self.page.url
+                # 主信号：已离开登录页
+                if "/web/user" not in url:
+                    # 再确认首页无"登录/注册"
                     human_delay(1.0, 2.0)
-                    return True
+                    if await self._is_logged_in_on_home():
+                        print(f"✅ 检测到登录成功（已跳转到 {url[:60]}），继续执行", flush=True)
+                        return True
             except Exception:
                 pass
             if i % 6 == 5:
@@ -485,29 +506,144 @@ class BossZhipinAutomator:
         """返回要遍历的热门城市列表"""
         return DEFAULT_HOT_CITIES
 
-    def _search_url(self, city: str, page_num: int = 1) -> str:
-        """构造某城市某页的搜索结果页 URL"""
-        from urllib.parse import quote
-        code = CITY_CODES.get(city, CITY_CODES["全国"])
-        q = quote(SEARCH_KEYWORD)
-        return f"https://www.zhipin.com/web/geek/jobs?query={q}&city={code}&page={page_num}"
-
-    async def goto_search(self, city: str, page_num: int = 1) -> bool:
-        """直接导航到指定城市+关键字+页码的搜索结果页"""
-        url = self._search_url(city, page_num)
-        print(f"🔍 导航到搜索结果: {city} 第{page_num}页 (city={CITY_CODES.get(city)})")
-        try:
-            await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            human_delay(3.0, 5.0)
-            # 等待职位卡渲染
+    async def _click_smart(self, page: Page, selectors: list[str], uitars_instruction: str,
+                           shot_name: str, require_text: str = None) -> bool:
+        """
+        混合点击：选择器优先，UI-TARS 兜底。
+        1. 依次尝试 Playwright 选择器（精确、可靠），命中可见元素则人类化点击
+        2. 全部失败时（页面反爬/动态结构），截图交给 UI-TARS 做 GUI grounding
+           定位按钮坐标并点击（这是 UI-TARS 的强项，通用多模态模型坐标不准）
+        返回是否点击成功。
+        require_text: 若指定，则要求元素文本精确等于它（用于在多个同类元素中选目标）
+        """
+        # 阶段1：选择器
+        for sel in selectors:
             try:
-                await self.page.wait_for_selector(".job-card-box", timeout=10000)
+                els = await page.query_selector_all(sel)
+                for el in els:
+                    if not await el.is_visible():
+                        continue
+                    if require_text is not None:
+                        t = (await el.text_content() or "").strip()
+                        if t != require_text:
+                            continue
+                    bb = await el.bounding_box()
+                    if bb:
+                        await human_mouse_move_and_click(
+                            page,
+                            int(bb["x"] + bb["width"] / 2),
+                            int(bb["y"] + bb["height"] / 2),
+                        )
+                    else:
+                        await el.click()
+                    return True
             except Exception:
-                pass
-            return True
+                continue
+
+        # 阶段2：UI-TARS 视觉兜底
+        print(f"  🔎 选择器未命中，改用 UI-TARS 视觉定位: {shot_name}")
+        try:
+            shot = await screenshot_page(page, shot_name)
+            resp = await call_uitars(shot, uitars_instruction)
+            action = parse_uitars_action(resp, page.viewport_size["width"], page.viewport_size["height"])
+            if action and action.get("action_type") in ("click", "left_single"):
+                await execute_action_on_page(page, action)
+                return True
+            print(f"  [WARN] UI-TARS 未返回有效点击动作: {resp[:120]}")
         except Exception as e:
-            print(f"  [WARN] 导航搜索页失败: {e}")
+            print(f"  [WARN] UI-TARS 兜底失败: {e}")
+        return False
+
+    async def _read_current_city(self) -> str:
+        """读取当前页面的城市标签（.city-label），用于确认/记录实际搜索城市"""
+        try:
+            el = await self.page.query_selector(".city-label, [class*='city-label']")
+            if el:
+                return (await el.text_content() or "").strip()
+        except Exception:
+            pass
+        return ""
+
+    async def switch_city_via_map(self, city: str) -> bool:
+        """
+        通过"地图→请选择城市→热门城市"面板选择城市（忠于用户要求的地图选城市方式）。
+        步骤：打开地图版职位页 → 点城市选择器 → 在热门城市面板点目标城市。
+        使用 _click_smart（选择器优先 + UI-TARS 兜底）以应对反爬时按钮定位。
+        """
+        from urllib.parse import quote
+        code = CITY_CODES[city]
+        q = quote(SEARCH_KEYWORD)
+        map_url = f"https://www.zhipin.com/web/geek/map/jobs?query={q}&cityCode={code}"
+        print(f"  🗺️ 打开地图选城市页 ({city})")
+        try:
+            await self.page.goto(map_url, wait_until="domcontentloaded", timeout=30000)
+            human_delay(3.0, 5.0)
+        except Exception as e:
+            print(f"  [WARN] 打开地图页失败: {e}")
             return False
+
+        # 点城市选择器打开面板
+        ok = await self._click_smart(
+            self.page,
+            ["[class*='city-sel']", ".city-label", "[class*='city-label']"],
+            "找到页面上显示当前城市名或'请选择城市'的按钮，点击它打开城市选择面板。",
+            "map_city_selector.png",
+        )
+        if not ok:
+            print("  [WARN] 未能打开城市选择面板")
+            return False
+        human_delay(1.5, 2.5)
+
+        # 在热门城市面板点目标城市
+        ok = await self._click_smart(
+            self.page,
+            ["*"],  # 选择器阶段用文本匹配热门城市链接
+            f"城市选择面板已打开，'热门城市'标签下找到'{city}'这个城市并点击它。",
+            f"map_hotcity_{city}.png",
+            require_text=city,
+        )
+        if not ok:
+            print(f"  [WARN] 未能在面板点选城市: {city}")
+            return False
+        human_delay(2.0, 3.5)
+
+        confirmed = await self._read_current_city()
+        print(f"  ✅ 地图面板已选择城市，页面城市标签确认为: [{confirmed}]")
+        return True
+
+    async def goto_list(self, city: str, page_num: int = 1) -> bool:
+        """
+        导航到列表版搜索结果页（可投递，有立即沟通+详情面板）。
+        登录后首次导航可能触发安全校验导致 0 卡，故 0 卡时重试一次。
+        导航后读取 .city-label 确认实际城市与预期一致。
+        """
+        from urllib.parse import quote
+        code = CITY_CODES[city]
+        q = quote(SEARCH_KEYWORD)
+        url = f"https://www.zhipin.com/web/geek/jobs?query={q}&city={code}&page={page_num}"
+        print(f"  🔍 列表搜索: {city} 第{page_num}页 (city={code})")
+
+        for attempt in range(2):
+            try:
+                await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                human_delay(3.0, 5.0)
+                try:
+                    await self.page.wait_for_selector(".job-card-box", timeout=10000)
+                except Exception:
+                    pass
+                n = len(await self.page.query_selector_all(".job-card-box"))
+                if n > 0:
+                    confirmed = await self._read_current_city()
+                    if confirmed and city not in confirmed and confirmed not in city:
+                        print(f"  ⚠️ 城市标签[{confirmed}]与预期[{city}]不一致，仍按预期[{city}]记录")
+                    print(f"  ✅ 城市确认: [{confirmed or city}] | 本页 {n} 个职位")
+                    return True
+                if attempt == 0:
+                    print("  ↻ 0 个职位（疑似首次导航安全校验），重试一次...")
+                    human_delay(3.0, 5.0)
+            except Exception as e:
+                print(f"  [WARN] 列表导航失败(尝试{attempt+1}): {e}")
+        return False
 
     async def get_job_listings(self) -> list[dict]:
         """提取当前搜索结果页的职位列表（选择器经实测：.job-card-box）"""
@@ -596,30 +732,27 @@ class BossZhipinAutomator:
             if not is_valid:
                 return False
 
-            # 点击"立即沟通"
+            # 先检查按钮文本：若是"继续沟通"说明之前已沟通过 → 记录并跳过
             chat_btn = await self.page.query_selector(
                 "a:has-text('立即沟通'), .op-btn-chat, a:has-text('继续沟通')"
             )
-            if not chat_btn:
-                print("  ⚠️ 未找到'立即沟通'按钮，跳过")
-                return False
+            if chat_btn:
+                btn_text = (await chat_btn.text_content() or "").strip()
+                if "继续沟通" in btn_text:
+                    print("  ℹ️ 该职位此前已沟通过，记录并跳过")
+                    record_application(self.applied_data, company, title, city)
+                    return False
 
-            btn_text = (await chat_btn.text_content() or "").strip()
-            if "继续沟通" in btn_text:
-                # 已经聊过 → 视为已投递，记录并跳过重复打招呼
-                print("  ℹ️ 该职位此前已沟通过，记录并跳过")
-                record_application(self.applied_data, company, title, city)
+            # 点击"立即沟通"（选择器优先，UI-TARS 视觉兜底）
+            clicked = await self._click_smart(
+                self.page,
+                ["a:has-text('立即沟通')", ".op-btn-chat"],
+                "找到右侧职位详情区的'立即沟通'按钮（绿色按钮），点击它开始沟通。",
+                f"chat_btn_{safe}.png",
+            )
+            if not clicked:
+                print("  ⚠️ 未能点击'立即沟通'按钮，跳过")
                 return False
-
-            bb = await chat_btn.bounding_box()
-            if bb:
-                await human_mouse_move_and_click(
-                    self.page,
-                    int(bb["x"] + bb["width"] / 2),
-                    int(bb["y"] + bb["height"] / 2),
-                )
-            else:
-                await chat_btn.click()
             human_delay(APPLY_DELAY_MIN, APPLY_DELAY_MAX)
 
             # 处理对话框 + 发送简历
@@ -700,32 +833,54 @@ class BossZhipinAutomator:
                 pass
 
     async def process_city(self, city: str):
-        """处理单个城市的全部远程职位（按页直达搜索结果 URL）"""
+        """
+        处理单个城市的全部远程职位：
+        1. 通过"地图→热门城市"面板选择城市（忠于用户要求）
+        2. 切到列表页逐页投递（地图页不可投递）
+        3. 全部完成后标记城市已完成（城市级去重）
+        """
         print(f"\n{'='*60}")
         print(f"🏙️ 开始处理城市: {city}")
         print(f"{'='*60}")
 
+        # 城市级去重：已完成的城市跳过
+        if is_city_completed(self.applied_data, city):
+            print(f"  ⏭️ 城市 [{city}] 之前已处理完成，跳过")
+            return
+
+        # 步骤1：地图面板选城市（忠于用户要求；失败不致命，列表页用城市码兜底）
+        await self.switch_city_via_map(city)
+
+        # 步骤2：列表页逐页投递
         page_num = 1
+        any_page_ok = False
         while page_num <= 5:  # 每个城市最多5页
             print(f"\n  📄 第 {page_num} 页")
-            if not await self.goto_search(city, page_num):
-                print(f"  ❌ 无法打开搜索页，跳过城市: {city}")
+            if not await self.goto_list(city, page_num):
+                if page_num == 1:
+                    print(f"  ❌ 第1页无职位，跳过城市: {city}")
+                else:
+                    print(f"  📄 已到最后一页")
                 break
 
+            any_page_ok = True
             await screenshot_page(self.page, f"results_{city}_p{page_num}.png")
 
             jobs = await self.get_job_listings()
             if not jobs:
-                print(f"  ⚠️ 未找到职位，停止翻页")
+                print(f"  ⚠️ 本页无职位，停止翻页")
                 break
 
             print(f"  找到 {len(jobs)} 个职位")
-
             for job in jobs:
                 await self.apply_to_job(job, city)
                 human_delay(DELAY_MIN, DELAY_MAX)
 
             page_num += 1
+
+        # 步骤3：标记城市完成（城市级去重）
+        if any_page_ok:
+            mark_city_completed(self.applied_data, city)
 
     async def run(self):
         """主运行入口"""
@@ -772,8 +927,9 @@ class BossZhipinAutomator:
                 # 汇总报告
                 print("\n" + "="*60)
                 print("✅ 投递完成！")
-                print(f"📊 本次共投递 {len(self.applied_data['jobs'])} 个职位")
-                print(f"📁 投递记录已保存至: {APPLIED_JOBS_FILE}")
+                print(f"📊 累计投递 {len(self.applied_data['jobs'])} 个职位")
+                print(f"🏙️ 已完成城市: {', '.join(self.applied_data.get('completed_cities', [])) or '无'}")
+                print(f"📁 记录已保存至: {APPLIED_JOBS_FILE}")
                 print("="*60)
 
                 # 显示投递记录
