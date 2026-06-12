@@ -258,7 +258,8 @@ async def verify_job_is_it_remote(job_title: str, job_desc: str, image_path: str
    AI 工程师（做模型/系统开发的）、嵌入式开发、测试开发(SDET)
 ❌ 必须排除（即使提到 AI/互联网/远程也要排除）：
    - 【运维类】运维工程师 / DevOps / SRE / 系统运维 / 网络运维 / 系统管理员（明确不投运维）
-   - 【特定技术栈】主要技术栈为 PHP 的开发岗、主要技术栈为 Django(Python Web) 的开发岗（这两类不投）
+   - 【特定技术栈】主要技术栈为 PHP / Django / C#/.NET 的开发岗（这几类不投）
+     注意：只排除 Django 这个具体框架；其他 Python Web（如 Flask、FastAPI）以及 Python 后端/数据/算法岗仍然要投
    - 数据标注/AI标注师、内容运营/用户运营/活动运营、产品经理、
      销售/市场/BD、猎头/HR/招聘、文案/写作/编辑/翻译、客服、
      平面/视觉/漫画设计、教师/培训、医学/医疗相关、
@@ -275,7 +276,7 @@ async def verify_job_is_it_remote(job_title: str, job_desc: str, image_path: str
 请严格按以下格式回答（一定要有"结论"行）：
 是否软件开发岗：是/否（说明依据，如具体开发职责/技术栈）
 是否运维/DevOps/SRE岗：是/否（若是→必须不投递）
-主要技术栈是否为PHP或Django：是/否（若是→必须不投递）
+主要技术栈是否为PHP/Django/C#/.NET：是/否（只看是否Django框架，不要把Flask/FastAPI等其他PythonWeb算进来；若是→必须不投递）
 是否支持远程：是/否
 结论：投递 / 不投递
 理由：（一句话，说明关键原因）"""
@@ -295,8 +296,17 @@ async def verify_job_is_it_remote(job_title: str, job_desc: str, image_path: str
     result = await _post_openrouter(payload, models=models)
     answer = result["choices"][0]["message"]["content"]
 
-    # 严格解析：必须出现"结论：投递"，且不能同时出现"不投递"
-    should_apply = ("结论：投递" in answer or "结论: 投递" in answer) and "不投递" not in answer
+    # 稳健解析：只看"结论"那一行，去掉 markdown 加粗(*)、空格再判断，
+    # 避免 (a) 模型用 **结论**：投递 破坏匹配 (b) 推理正文里出现"不投递"误伤。
+    concl_line = ""
+    for line in answer.splitlines():
+        if "结论" in line:
+            concl_line = line
+            break
+    c = concl_line.replace("*", "").replace(" ", "").replace("：", ":")
+    if "结论" in c:
+        c = c.split("结论", 1)[1]  # 取"结论"之后部分
+    should_apply = ("投递" in c) and ("不投递" not in c)
     return should_apply, answer
 
 
