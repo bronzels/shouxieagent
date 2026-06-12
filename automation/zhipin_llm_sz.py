@@ -10,7 +10,7 @@ Boss直聘自动投递 - 大模型·深圳专项任务
 
 复用：BossZhipinAutomator（start_browser / check_login_and_wait / apply_to_job /
       get_job_listings / _click_smart / _close_greet_dialog 等全部复用）。
-      通过注入 verify_fn=verify_damoxing_sz 实现定制判断，无需复制任何投递逻辑。
+      通过注入 verify_fn=verify_llm_sz 实现定制判断，无需复制任何投递逻辑。
 """
 
 import asyncio
@@ -49,9 +49,9 @@ from zhipin_apply import (
 
 # ─── 配置 ─────────────────────────────────────────────────────────────────────
 
-DAMOXING_SEARCH_KEYWORD = "大模型"
-DAMOXING_CITY = "深圳"
-DAMOXING_CITY_CODE = CITY_CODES["深圳"]  # "101280600"
+LLM_SEARCH_KEYWORD = "大模型"
+LLM_CITY = "深圳"
+LLM_CITY_CODE = CITY_CODES["深圳"]  # "101280600"
 
 # 大模型岗位薪资硬条件：30K/月
 SALARY_THRESHOLD = 30_000  # 单位：元/月
@@ -119,7 +119,7 @@ def salary_covers_30k(salary_text: str) -> bool:
 
 # ─── 大模型深圳职位判断函数 ───────────────────────────────────────────────────
 
-async def verify_damoxing_sz(job_title: str, job_desc: str, salary: str = "") -> tuple[bool, str]:
+async def verify_llm_sz(job_title: str, job_desc: str, salary: str = "") -> tuple[bool, str]:
     """
     判断职位是否满足「大模型·深圳」投递条件：
       1. 与大模型相关（LLM/大模型/AIGC/生成式AI/RAG/Agent/微调/推理/预训练等）
@@ -150,8 +150,11 @@ async def verify_damoxing_sz(job_title: str, job_desc: str, salary: str = "") ->
    算法工程师 / 模型工程师 / AI工程师 / 后端工程师 / 全栈工程师 / 平台工程师 /
    算法负责人 / AI技术经理 / 技术总监（技术背景）/ 研究员 / 架构师
    注意：管理岗允许（与远程任务不同，这里管理岗可以投递）
+   运维开发说明：以【开发为主】的运维开发/平台开发/工具链开发/DevOps平台研发可以投；
+   但【纯运维】、SRE值守、7×24随时待命/oncall为主、保障稳定性而非写代码的岗位 → 不投。
 ❌ 排除（不是开发/技术管理的岗位）：
-   产品经理 / 项目经理 / 运营 / 销售 / 市场 / 招聘 / HR / 行政
+   产品经理 / 项目经理 / 运营 / 销售 / 市场 / 招聘 / HR / 行政 /
+   纯运维 / SRE值守 / 7×24待命运维 / 系统管理员（以保障/值守为主、非以写代码开发为主）
 
 【备注：薪资方面】
 薪资信息（{salary}）已在代码层面做了硬判断（是否≥30K/月）。
@@ -191,29 +194,29 @@ async def verify_damoxing_sz(job_title: str, job_desc: str, salary: str = "") ->
 
 # ─── 大模型深圳专项 Automator ─────────────────────────────────────────────────
 
-class DamoxingSzAutomator(BossZhipinAutomator):
+class LlmSzAutomator(BossZhipinAutomator):
     """
     大模型·深圳专项投递。
     复用 BossZhipinAutomator 全部基础设施（浏览器/登录/投递/去重/状态过滤/CSV）。
-    通过构造时注入 verify_fn=verify_damoxing_sz 实现定制判断。
+    通过构造时注入 verify_fn=verify_llm_sz 实现定制判断。
     仅覆盖：列表页 URL 生成（固定深圳+大模型关键字）、run() 主流程。
     """
 
     def __init__(self, dry_run=False):
-        super().__init__(verify_fn=verify_damoxing_sz, dry_run=dry_run)
-        self.search_keyword = DAMOXING_SEARCH_KEYWORD
-        self.city = DAMOXING_CITY
-        self.city_code = DAMOXING_CITY_CODE
+        super().__init__(verify_fn=verify_llm_sz, dry_run=dry_run)
+        self.search_keyword = LLM_SEARCH_KEYWORD
+        self.city = LLM_CITY
+        self.city_code = LLM_CITY_CODE
         # 薪资字体反爬 → 截图+多模态读真实薪资（含30K判断依赖准确薪资）
         self.salary_resolver = self._resolve_salary
 
     async def _resolve_salary(self, page) -> str:
         """截图详情页 → 免费多模态模型读出真实薪资（应对 Boss直聘薪资字体反爬）。"""
         import zhipin_apply as za
-        shot = await za.screenshot_page(page, "damoxing_salary.png")
+        shot = await za.screenshot_page(page, "llm_salary.png")
         return await za.read_salary_via_multimodal(shot)
 
-    async def goto_list_damoxing(self, page_num: int = 1) -> bool:
+    async def goto_list_llm(self, page_num: int = 1) -> bool:
         """
         导航到大模型·深圳列表搜索结果页。
         URL 格式与远程任务一致，只是关键字换成「大模型」、城市固定深圳。
@@ -282,7 +285,7 @@ class DamoxingSzAutomator(BossZhipinAutomator):
                 any_page_ok = False
                 while page_num <= 10:  # 大模型岗位每次最多10页
                     print(f"\n  第 {page_num} 页")
-                    if not await self.goto_list_damoxing(page_num):
+                    if not await self.goto_list_llm(page_num):
                         if page_num == 1:
                             print("  第1页无职位，退出")
                         else:
@@ -290,7 +293,7 @@ class DamoxingSzAutomator(BossZhipinAutomator):
                         break
 
                     any_page_ok = True
-                    await screenshot_page(self.page, f"damoxing_sz_p{page_num}.png")
+                    await screenshot_page(self.page, f"llm_sz_p{page_num}.png")
 
                     jobs = await self.get_job_listings()
                     if not jobs:
@@ -350,7 +353,7 @@ class DamoxingSzAutomator(BossZhipinAutomator):
 def _build_arg_parser():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Boss直聘自动投递 - 大模型·深圳专项（复用BossZhipinAutomator，注入verify_damoxing_sz）",
+        description="Boss直聘自动投递 - 大模型·深圳专项（复用BossZhipinAutomator，注入verify_llm_sz）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例：
@@ -413,7 +416,7 @@ def main():
 
     if args.dry_run:
         print("🧪 dry-run 试运行：只搜索+判断，不实际投递", flush=True)
-    asyncio.run(DamoxingSzAutomator(dry_run=args.dry_run).run())
+    asyncio.run(LlmSzAutomator(dry_run=args.dry_run).run())
 
 
 if __name__ == "__main__":

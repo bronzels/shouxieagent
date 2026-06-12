@@ -598,7 +598,7 @@ class BossZhipinAutomator:
                    默认为 None，此时 apply_to_job 使用模块级 verify_job_is_it_remote。
                    通过注入不同的 verify_fn，同一个 Automator 可服务：
                      - 远程岗任务（verify_job_is_it_remote）
-                     - 大模型深圳任务（verify_damoxing_sz）
+                     - 大模型深圳任务（verify_llm_sz）
                      - 职位 tab 混合任务（verify_mixed）
         dry_run:   调试模式。为 True 时，apply_to_job 完成检查+判断+打印结论，但
                    【不点立即沟通、不发招呼、不记录投递】，用于安全验证筛选逻辑。

@@ -9,7 +9,7 @@ Boss直聘自动投递 - 首页职位Tab专项任务
 
 对每个职位使用混合判断（verify_mixed）：
   - 远程岗 → verify_job_is_it_remote
-  - 深圳岗 → verify_damoxing_sz（从 zhipin_llm_sz import）
+  - 深圳岗 → verify_llm_sz（从 zhipin_llm_sz import）
   - 两者都不是 → 跳过
 
 复用：BossZhipinAutomator（全部基础设施共享）。
@@ -48,7 +48,7 @@ from zhipin_apply import (
 )
 
 # ─── 复用大模型深圳的判断函数 ─────────────────────────────────────────────────
-from zhipin_llm_sz import verify_damoxing_sz
+from zhipin_llm_sz import verify_llm_sz
 
 # ─── 配置 ─────────────────────────────────────────────────────────────────────
 
@@ -91,7 +91,7 @@ async def verify_mixed(
     """
     混合判断函数：根据职位地点/描述是否为远程或深圳，选择对应的 verify 函数。
     - 远程岗 → verify_job_is_it_remote（title, desc, salary）
-    - 深圳岗 → verify_damoxing_sz（title, desc, salary，需满足30K硬条件）
+    - 深圳岗 → verify_llm_sz（title, desc, salary，需满足30K硬条件）
     - 两者都不是 → 跳过（返回 False）
 
     注意：一个职位可能同时满足"远程+深圳"（深圳的远程岗），
@@ -105,7 +105,7 @@ async def verify_mixed(
         return should, f"[远程岗路径] {reason}"
 
     if is_sz:
-        should, reason = await verify_damoxing_sz(title, desc, salary)
+        should, reason = await verify_llm_sz(title, desc, salary)
         return should, f"[深圳大模型路径] {reason}"
 
     # 既不是远程也不是深圳

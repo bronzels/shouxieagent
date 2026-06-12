@@ -172,6 +172,14 @@ SEL = {
         "button:has-text('确定')",
         "[class*='resume'] .btn-confirm",
     ],
+    # 聊天文本输入框（底部，"按Enter发送"）。TODO[调试确认]：实际选择器待核对。
+    "chat_input": [
+        "#chat-input",
+        ".chat-input",
+        "textarea.input-area",
+        "div[contenteditable='true']",
+        "textarea",
+    ],
 }
 
 
@@ -587,7 +595,43 @@ class ZhipinMessageScanner:
             print("  ℹ️ 未点到独立的确认按钮（可能选中即发送），请调试时确认是否已发出", flush=True)
         za.human_delay(1.5, 2.5)
         print(f"  ✅ 已执行发送【{ver_name}】简历动作（实际是否送达需调试时人工确认）", flush=True)
+        # 发完简历补一句礼貌话
+        await self._send_chat_text("简历已发，请您查收")
         return True
+
+    async def _send_chat_text(self, text: str) -> bool:
+        """在当前会话的聊天输入框里输入一句话并按 Enter 发送。"""
+        for sel in SEL["chat_input"]:
+            try:
+                el = await self.page.query_selector(sel)
+                if el and await el.is_visible():
+                    await el.click()
+                    za.human_delay(0.3, 0.7)
+                    await el.type(text, delay=60)
+                    za.human_delay(0.3, 0.6)
+                    await self.page.keyboard.press("Enter")
+                    za.human_delay(0.8, 1.5)
+                    print(f"  💬 已发送消息: {text}", flush=True)
+                    return True
+            except Exception:
+                continue
+        # 选择器失败 → UI-TARS 视觉兜底定位输入框
+        ok = await self.click_smart(
+            SEL["chat_input"],
+            "找到聊天窗口底部的消息输入框并点击它（准备输入文字）。",
+            "chat_input.png",
+        )
+        if ok:
+            try:
+                await self.page.keyboard.type(text, delay=60)
+                za.human_delay(0.3, 0.6)
+                await self.page.keyboard.press("Enter")
+                print(f"  💬 已发送消息(兜底): {text}", flush=True)
+                return True
+            except Exception:
+                pass
+        print(f"  [WARN] 未能发送消息 '{text}'（待调试确认输入框选择器）", flush=True)
+        return False
 
     # ── 处理单条会话 ────────────────────────────────────────────────────────────
     async def process_conversation(self, index: int) -> dict:
