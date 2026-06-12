@@ -1,0 +1,20 @@
+services:
+  ui-tars:
+    build: .
+    image: ui-tars:latest
+    container_name: ui-tars
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - /mnt/ext4disk/ui-tars/models:/models:ro
+    environment:
+      - MODEL_PATH=/models/UI-TARS-1.5-7B.Q4_K_M.gguf
+      - N_CTX=8192
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
