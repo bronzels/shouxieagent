@@ -354,14 +354,19 @@ def _build_arg_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例：
-  # 使用 .env 中的 OpenRouter key
-  python automation/zhipin_damoxing_sz.py
+  # 试运行（只搜索+判断，不投递）
+  python automation/zhipin_llm_sz.py --dry-run
 
-  # 命令行传入 key
-  python automation/zhipin_damoxing_sz.py --openrouter-key sk-or-v1-xxx
+  # 使用 .env 中的 OpenRouter key 正式跑
+  python automation/zhipin_llm_sz.py
 
-  # 指定 UI-TARS 为 remote 方式
-  python automation/zhipin_damoxing_sz.py \\
+  # 本地 UI-TARS 推理（局域网服务器 192.168.3.14），验证职位仍走 OpenRouter
+  python automation/zhipin_llm_sz.py --uitars-provider local \\
+    --uitars-local-url http://192.168.3.14:8000/v1 \\
+    --openrouter-key sk-or-v1-xxx
+
+  # remote 方式（Kaggle/Colab 的 x-api-key endpoint）
+  python automation/zhipin_llm_sz.py \\
     --uitars-provider remote \\
     --uitars-endpoint https://xxxx.ngrok.io/v1/chat/completions \\
     --uitars-key super-secret-key
@@ -375,6 +380,9 @@ def _build_arg_parser():
                         help="remote 方式下 UI-TARS endpoint URL")
     parser.add_argument("--uitars-key", default=None,
                         help="remote 方式下 UI-TARS x-api-key 鉴权 key")
+    parser.add_argument("--uitars-local-url", default=None,
+                        help="local 方式下本地/局域网 UI-TARS 推理服务地址（OpenAI 兼容，含 /v1），"
+                             "如 http://192.168.3.14:8000/v1")
     parser.add_argument("--dry-run", action="store_true",
                         help="试运行：搜索+判断+打印结论，但不点立即沟通/不发招呼/不记录，用于安全验证筛选。")
     return parser
@@ -392,12 +400,15 @@ def main():
         za.UITARS_KEY = args.uitars_key
     if args.uitars_endpoint:
         za.UITARS_ENDPOINT = args.uitars_endpoint
+    if args.uitars_local_url:
+        za.UITARS_LOCAL_URL = args.uitars_local_url
 
     if za.UITARS_PROVIDER == "remote" and not za.UITARS_ENDPOINT:
         parser.error("--uitars-provider remote 需要同时指定 --uitars-endpoint")
 
     print(f"UI-TARS 提供方式: {za.UITARS_PROVIDER}"
-          + (f" | endpoint: {za.UITARS_ENDPOINT}" if za.UITARS_PROVIDER == "remote" else ""),
+          + (f" | endpoint: {za.UITARS_ENDPOINT}" if za.UITARS_PROVIDER == "remote" else "")
+          + (f" | local: {za.UITARS_LOCAL_URL}" if za.UITARS_PROVIDER == "local" else ""),
           flush=True)
 
     if args.dry_run:

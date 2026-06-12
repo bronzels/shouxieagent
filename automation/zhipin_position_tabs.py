@@ -9,7 +9,7 @@ Boss直聘自动投递 - 首页职位Tab专项任务
 
 对每个职位使用混合判断（verify_mixed）：
   - 远程岗 → verify_job_is_it_remote
-  - 深圳岗 → verify_damoxing_sz（从 zhipin_damoxing_sz import）
+  - 深圳岗 → verify_damoxing_sz（从 zhipin_llm_sz import）
   - 两者都不是 → 跳过
 
 复用：BossZhipinAutomator（全部基础设施共享）。
@@ -48,7 +48,7 @@ from zhipin_apply import (
 )
 
 # ─── 复用大模型深圳的判断函数 ─────────────────────────────────────────────────
-from zhipin_damoxing_sz import verify_damoxing_sz
+from zhipin_llm_sz import verify_damoxing_sz
 
 # ─── 配置 ─────────────────────────────────────────────────────────────────────
 
