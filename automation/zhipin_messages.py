@@ -100,23 +100,25 @@ SEL = {
         ".chat-user-list li",
         "[role='listitem']",
     ],
-    # 会话项内：公司名
+    # 会话项内：公司名（实测列表项 .title-box 结构同头部：.name-text+<span>公司+.vline+<span>角色）
     "conv_company": [
-        ".name-box .name-text",   # 有时显示对方姓名@公司
-        "[class*='company']",
-        ".company",
+        ".title-box .name-text + span",
+        ".name-box .name-text + span",
     ],
-    # 会话项内：职位名
+    # 会话项内：招聘者姓名（仅供日志参考，非 key）
+    "conv_recruiter": [
+        ".name-box .name-text",
+    ],
+    # 会话项内：职位名（列表项不单独显示职位，靠招呼语预览正则提取，见 process_conversation）
     "conv_position": [
         "[class*='source-job']",
         "[class*='job-name']",
-        ".position",
     ],
-    # 会话项内：最后一条消息预览
+    # 会话项内：最后一条消息预览（含我发的招呼语："请问贵公司的X还有空缺么"）
     "conv_preview": [
+        ".last-msg-text",
         "[class*='last-msg']",
         ".gray .push-text",
-        ".message-text",
     ],
     # 会话项内：未读红点 / 未读数徽标
     "conv_badge": [
@@ -125,13 +127,15 @@ SEL = {
         "[class*='unread']",
     ],
     # 进入会话后右侧聊天窗口的标题区（含对方公司+职位）
+    # 实测：头部 .title-box .name-box 结构为 .name-text(招聘者名)+<span>(公司)+.vline+<span>(角色)
+    #       公司 = .name-text 的相邻兄弟 span；职位单独在 .position-name。
     "chat_title_company": [
-        "[class*='figure'] [class*='name']",
-        ".chat-title .name",
+        ".title-box .name-text + span",
+        ".name-box .name-text + span",
     ],
     "chat_title_position": [
-        "[class*='chat-title'] [class*='job']",
-        ".chat-title .job-name",
+        ".position-name",
+        ".position-content .position-name",
     ],
     # 聊天消息气泡：对方(BOSS)发的消息（用于判断是否已回复 + 取最后一条文本）
     # Boss直聘消息气泡一般用 .item-friend(对方) / .item-myself(我) 区分。
@@ -232,6 +236,26 @@ def wants_english_resume(text: str) -> bool:
     return False
 
 
+def extract_position_from_greeting(preview: str) -> str:
+    """
+    从我发出的招呼语预览里提取职位名。
+    招呼语模板形如："[送达] 请问贵公司的<职位名>还有空缺么？我个人挺感兴趣的"
+    返回 <职位名>；提取不到返回 ""。
+    注意：列表项预览可能被截断，截断时返回的职位名也是截断的——进入会话后
+    会用 .position-name 覆盖为完整职位名（见 _read_chat_company_position）。
+    """
+    if not preview:
+        return ""
+    m = re.search(r"请问贵公司的(.+?)还有空缺", preview)
+    if m:
+        return m.group(1).strip()
+    # 截断情况：取"请问贵公司的"之后的剩余部分
+    m2 = re.search(r"请问贵公司的(.+)$", preview)
+    if m2:
+        return m2.group(1).strip()
+    return ""
+
+
 # ─── 主扫描器 ─────────────────────────────────────────────────────────────────
 
 class ZhipinMessageScanner:
@@ -240,13 +264,15 @@ class ZhipinMessageScanner:
     复用 zhipin_apply 的浏览器启动做法（持久化 chrome_profile，复用已登录态）。
     """
 
-    def __init__(self, export_csv: bool = False):
+    def __init__(self, export_csv: bool = False, no_send_resume: bool = False):
         self.status_data = zhipin_status.load_status()
         self.page: Page = None
         self.context = None
         self.viewport_width = 1280
         self.viewport_height = 800
         self.export_csv = export_csv
+        # 调试用：只扫描分类记录状态，不实际发简历（索要简历的仅标 asked_resume）
+        self.no_send_resume = no_send_resume
         # 本次扫描每条会话的结果（用于可选 CSV 导出）
         self.scan_rows: list[dict] = []
 
@@ -291,6 +317,47 @@ class ZhipinMessageScanner:
             return True
         except Exception:
             return False
+
+    async def ensure_login(self) -> bool:
+        """
+        内置扫码登录（固化进脚本，不依赖外部临时程序）。
+        先访问首页判断登录态；未登录则打开扫码登录页，显示二维码并轮询，
+        扫码成功(URL 离开 /web/user)后在同一会话继续后续扫描，不关浏览器。
+        登录态持久化到 chrome_profile，下次重跑免扫码。
+        """
+        await self.page.goto("https://www.zhipin.com/", wait_until="domcontentloaded", timeout=30000)
+        za.human_delay(2.0, 3.0)
+        if await self._is_logged_in():
+            print("✅ 已检测到登录状态（chrome_profile 已保存登录），继续", flush=True)
+            return True
+
+        print("\n" + "=" * 60)
+        print("🔐 未登录，正在打开扫码登录页...")
+        try:
+            await self.page.goto("https://www.zhipin.com/web/user/?ka=header-login",
+                                 wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+        za.human_delay(2.0, 3.0)
+        await za.screenshot_page(self.page, "login_qr.png")
+        print("👉 浏览器已显示二维码，请用 BOSS直聘 APP 扫码登录")
+        print("   每 5 秒检测一次，最长等待 10 分钟。二维码过期会自动刷新")
+        print("=" * 60 + "\n", flush=True)
+
+        for i in range(120):
+            await asyncio.sleep(5)
+            try:
+                if "/web/user" not in self.page.url:
+                    za.human_delay(1.0, 2.0)
+                    if await self._is_logged_in():
+                        print(f"✅ 扫码登录成功（已跳转 {self.page.url[:50]}），继续", flush=True)
+                        return True
+            except Exception:
+                pass
+            if i % 6 == 5:
+                print(f"  ⏳ 仍在等待扫码登录... ({(i+1)*5}秒)", flush=True)
+        print("⚠️ 等待登录超时（10分钟）", flush=True)
+        return False
 
     # ── 鲁棒点击：复用主脚本的 _click_smart 思路（选择器优先 + UI-TARS 兜底）─────
     async def click_smart(self, selectors: list[str], uitars_instruction: str,
@@ -370,8 +437,7 @@ class ZhipinMessageScanner:
                 continue
 
             if not await self._is_logged_in():
-                print("  ⚠️ 未检测到登录态。请先用 zhipin_apply.py 扫码登录"
-                      "（登录态保存在 automation/chrome_profile）。", flush=True)
+                print("  ⚠️ 打开聊天页时丢失登录态（异常）。", flush=True)
                 return False
 
             # 等待会话列表渲染
@@ -456,16 +522,16 @@ class ZhipinMessageScanner:
     async def _read_chat_company_position(self, fallback_company: str,
                                            fallback_position: str) -> tuple[str, str]:
         """
-        进入会话后从聊天窗口标题区读取公司名/职位名；读不到则用会话列表项的兜底值。
-        TODO[调试确认]：chat_title_company / chat_title_position 选择器待核对。
+        进入会话后从右侧聊天头部读取职位名（.position-name，仅头部存在，按会话准确）。
+        公司名【不】从头部读取——实测头部 .name-text 的兄弟不是公司，且 .title-box/.name-text
+        在左侧会话列表(40项)里也存在，整页 query_selector 会误抓列表第一项的公司。
+        因此公司沿用会话列表项(item 作用域)提取的 fallback_company（实测准确）。
+        只用 .position-name 覆盖职位（列表项预览职位可能被截断，头部职位完整）。
         """
         company, position = fallback_company, fallback_position
-        # _first_text 接受 ElementHandle 或 page 均可 query_selector
         try:
-            c = await self._first_text(self.page, SEL["chat_title_company"])
+            # 只取头部职位（.position-name 仅在右侧聊天头部，按当前会话准确、完整）
             p = await self._first_text(self.page, SEL["chat_title_position"])
-            if c:
-                company = c
             if p:
                 position = p
         except Exception:
@@ -547,6 +613,10 @@ class ZhipinMessageScanner:
         preview = await self._first_text(item, SEL["conv_preview"])
         has_badge = await self._has_unread_badge(item)
 
+        # 列表项不单独显示职位 → 从我发的招呼语预览正则提取："请问贵公司的<职位>还有空缺么"
+        if not position and preview:
+            position = extract_position_from_greeting(preview)
+
         label = f"{company or '?'} | {position or '?'}"
         print(f"\n  [{index + 1}] 会话: {label}  预览='{preview[:30]}'  未读={has_badge}", flush=True)
 
@@ -619,6 +689,12 @@ class ZhipinMessageScanner:
             version = RESUME_EN if want_en else RESUME_CN
             ver_name = "英文" if want_en else "中文"
 
+            # 调试模式：只记录 asked_resume，不实际发简历
+            if self.no_send_resume:
+                print(f"  ⏸️ [--no-send-resume] 跳过发简历，仅记录 asked_resume（应发{ver_name}简历）", flush=True)
+                return {"company": company, "position": position,
+                        "status": "asked_resume", "note": f"待发{ver_name}简历(调试未发)"}
+
             sent = await self.send_resume(version)
             if sent:
                 zhipin_status.upsert_status(
@@ -681,6 +757,11 @@ class ZhipinMessageScanner:
         async with async_playwright() as playwright:
             await self.start_browser(playwright)
             try:
+                # 内置扫码登录（固化进脚本，未登录则显示二维码等扫码）
+                if not await self.ensure_login():
+                    print("❌ 未能登录，终止。", flush=True)
+                    return
+
                 if not await self.open_chat_page():
                     print("❌ 未能打开聊天页/会话列表，终止。", flush=True)
                     return
@@ -761,6 +842,10 @@ def _build_arg_parser():
         "--export-csv", action="store_true",
         help="把本次扫描每条会话状态导出为 CSV 到 automation/reports/。",
     )
+    parser.add_argument(
+        "--no-send-resume", action="store_true",
+        help="调试用：只扫描分类并记录状态，索要简历的仅标记 asked_resume，不实际发送简历。",
+    )
     # UI-TARS 提供方式（与 zhipin_apply 一致，影响视觉兜底定位按钮的调用路径）
     parser.add_argument(
         "--uitars-provider", choices=["openrouter", "remote", "local"], default="openrouter",
@@ -809,7 +894,10 @@ def main():
           + (f" | endpoint: {za.UITARS_ENDPOINT}" if za.UITARS_PROVIDER == "remote" else ""),
           flush=True)
 
-    asyncio.run(ZhipinMessageScanner(export_csv=args.export_csv).run())
+    if args.no_send_resume:
+        print("⏸️ --no-send-resume：本次只扫描记录状态，不实际发简历", flush=True)
+    asyncio.run(ZhipinMessageScanner(
+        export_csv=args.export_csv, no_send_resume=args.no_send_resume).run())
 
 
 if __name__ == "__main__":

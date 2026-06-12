@@ -1,0 +1,293 @@
+{
+  "records": [
+    {
+      "company": "深圳市小满科技",
+      "position": "AI资深开发/架构师(J10302)",
+      "status": "unread",
+      "updated_at": "2026-06-12 20:40:25",
+      "task_source": "zhipin_messages",
+      "note": "对方有回复但非拒绝/索简历(other): 刘先生您好，看到您对深圳 Java的职位感兴趣，我们这个岗位福利待遇各方面都挺不错的，您现在还在找工作的话，方便聊聊吗？"
+    },
+    {
+      "company": "中冶赛迪集团有限公司",
+      "position": "数据分析/算法实习生（可远程线上）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:40:32",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "三盈科技",
+      "position": "远程 Java 全栈开发（25k 起 独立负责）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:40:40",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "郑州熵灵科技有限公司",
+      "position": "线上兼职可远程办公",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:40:47",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "拓维云创",
+      "position": "Java开发工程师（双休+远程面试）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:40:54",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "乐兔未来",
+      "position": "大数据开发工程师（远程）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:41:01",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "领职",
+      "position": "Golang-全职远程",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:41:07",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "成华区柒分站图文...",
+      "position": "资深后端架构师（可远程办公）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:41:21",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "成都追曜信息科技",
+      "position": "兼职·大模型应用工程师（兼职/远程）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:42:32",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "流动方舟",
+      "position": "golang架构师（远程）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:42:42",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "安徽潜水艇人力资源",
+      "position": "量化策略（远程）（猎头职位）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:42:52",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "触海科技",
+      "position": "远程岗位：AI 产品工程师",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:42:58",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "长沙市焰流科技",
+      "position": "高级JAVA开发（远程）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:43:06",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "湾流畅游",
+      "position": "居家办公兼职/软件开发-全栈开发",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:43:13",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "CLPS华钦软件",
+      "position": "Data Engineer（英语流利/居家办公/双休）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:43:21",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "仁伏仔",
+      "position": "【远程全职】全栈开发工程师",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:43:27",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "英特利普",
+      "position": "QA/测试开发工程师（远程办公）（猎头职位）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:43:37",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "良机互优",
+      "position": "全栈工程师(python,react,居家办公)（猎头职位）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:43:44",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "星垂智能",
+      "position": "高级区块链开发工程师（远程）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:43:53",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "捷瑞网络技术",
+      "position": "【AI海外业务 居家】Engineering Manager",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:44:01",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "浦城科盐教育科技",
+      "position": "兼职·远程数据分析师（问卷）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:44:46",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "预贤企业",
+      "position": "合约测试开发（远程办公）（猎头职位）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:44:53",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "金华希睿企业管理咨询",
+      "position": "可远程-Applied AI Engineer（代招职位）",
+      "status": "rejected",
+      "updated_at": "2026-06-12 20:45:08",
+      "task_source": "zhipin_messages",
+      "note": "对方拒绝: 不好意思，不太合适哦"
+    },
+    {
+      "company": "法本",
+      "position": "AI开发  半居家 六险一金 远程面试",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:45:14",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "南通无维科技",
+      "position": "软件工程师【兼职、实习】",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:45:23",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "时代传浮",
+      "position": "ML Engineer-远程办公",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:45:30",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "MobTech",
+      "position": "JAVA高级架构师（可远程）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:45:38",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "上海高仙",
+      "position": "远程部署实习生",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:45:45",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "码城科技",
+      "position": "兼职·ai智能体开发工程师 （远程）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:45:52",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "北京白小杨商贸中...",
+      "position": "pg数据开发工程师远程全职支持",
+      "status": "unread",
+      "updated_at": "2026-06-12 20:46:12",
+      "task_source": "zhipin_messages",
+      "note": "对方有回复但非拒绝/索简历(other): 你好啊，可以聊一聊~ pg开发这个岗位是远程全职支持2-3个月，需要匹配的条件如下，1远程全职支持2-3个月2精通pos"
+    },
+    {
+      "company": "英悦芯瑞",
+      "position": "研发项目经理（远程）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:46:19",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "北京五十步电子商务",
+      "position": "兼职·python量化研究员远程",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:46:27",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "梦塔科技",
+      "position": "AI / 后端工程师（可远程）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:46:35",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "慧科讯业",
+      "position": "爬虫实习生-可远程",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:46:43",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "夏尔投资",
+      "position": "量化研究员【远程】",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:46:50",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    },
+    {
+      "company": "科锐国际",
+      "position": "全栈开发工程师（远程）（猎头职位）",
+      "status": "read_noreply",
+      "updated_at": "2026-06-12 20:46:57",
+      "task_source": "zhipin_messages",
+      "note": "无对方回复(已读不回/未读但无红点)"
+    }
+  ],
+  "last_updated": "2026-06-12 20:46:58"
+}

@@ -22,6 +22,7 @@
 """
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -32,8 +33,26 @@ BLOCKING_STATUSES = {"read_noreply", "rejected", "asked_resume", "resume_sent"}
 ALL_STATUSES = {"unread"} | BLOCKING_STATUSES
 
 
+def _normalize_position(position: str) -> str:
+    """
+    归一化职位名，让"投递时从职位卡读到的标题"与"消息页聊天头部读到的标题"对齐。
+    聊天头部常给职位加装饰标签，去掉这些不影响身份的修饰：
+      - 前缀："兼职·" / "兼职｜" / "兼职|"
+      - 后缀的职位类型括注：（猎头职位）/（代招职位）/（外包）/（项目制）/（代招）等
+    注意：仅去除明确的装饰标签，不动职位主体，避免不同职位塌缩成同一 key。
+    """
+    p = (position or "").strip()
+    # 去前缀
+    for pre in ("兼职·", "兼职｜", "兼职|"):
+        if p.startswith(pre):
+            p = p[len(pre):].strip()
+    # 去尾部职位类型括注（中文/英文括号）
+    p = re.sub(r"[（(](猎头职位|代招职位|代招|外包|项目制|外包职位)[）)]\s*$", "", p).strip()
+    return p
+
+
 def _key(company: str, position: str) -> str:
-    return f"{company.strip()}|{position.strip()}"
+    return f"{company.strip()}|{_normalize_position(position)}"
 
 
 def load_status() -> dict:
