@@ -19,6 +19,7 @@ services:
       --port 8000
       --n_gpu_layers -1
       --n_ctx 8192
+      --flash_attn true
     environment:
       - MODEL_PATH=/models/UI-TARS-1.5-7B-q4_k_m.gguf
       - MMPROJ_PATH=/models/UI-TARS-1.5-7B-q8_0.mmproj
