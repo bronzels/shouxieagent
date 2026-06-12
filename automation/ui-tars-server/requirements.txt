@@ -1,0 +1,6 @@
+vllm==0.6.6
+transformers>=4.45.0
+huggingface_hub>=0.24.0
+openai>=1.0.0
+ui-tars
+Pillow
