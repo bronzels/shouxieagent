@@ -869,23 +869,24 @@ class BossZhipinAutomator:
             pass
         return False
 
-    async def apply_to_job(self, job: dict, city: str) -> bool:
+    async def apply_to_job(self, job: dict, city: str) -> str:
         """
-        对单个职位投递（Boss直聘聊天式）：
-        1. 点职位卡 → 右侧详情面板更新（同页）
-        2. 抓取标题+正文描述 → Gemini 严格判断是否 IT软件类 且 远程
-        3. 通过 → 点"立即沟通"（自动发打招呼语 = 完成投递）
-        4. 关闭"已向BOSS发送消息"弹窗（点X，避免遮罩挡住后续点击）
-        5. 记录投递；按钮若是"继续沟通"说明之前已发过消息 → 记录并跳过不重复
+        对单个职位投递（Boss直聘聊天式）。返回状态码用于统计：
+          "applied"   —— 新投递成功
+          "dup"       —— 已投递过（去重跳过）
+          "reject"    —— 验证不通过（非IT软件/非远程/被排除）
+          "contacted" —— 此前已沟通过（记录，不重复发）
+          "fail"      —— 投递过程出错
+        流程：点卡→抓标题+正文→严格判断→通过则点立即沟通(发招呼=投递)→关弹窗→记录
         """
         company = job.get("company", "")
         title = job.get("title", "")
 
         if is_already_applied(self.applied_data, company, title):
-            print(f"  ⏭️ 跳过（已投递）: {company} | {title}")
-            return False
+            print(f"  ⏭️  [跳过-已投递] {company} | {title}")
+            return "dup"
 
-        print(f"\n  📋 处理职位: {company} | {title}")
+        print(f"\n  🔎 检查职位: {company} | {title}")
         print(f"     薪资: {job.get('salary', 'N/A')} | 地点: {job.get('location','')} | 标签: {', '.join(job.get('tags', []))}")
 
         try:
@@ -923,11 +924,11 @@ class BossZhipinAutomator:
                 should_apply, reason = await verify_job_is_it_remote(title, desc, shot_path)
                 model_used = "多模态"
 
-            verdict = "✅ 投递" if should_apply else "❌ 不投递"
+            verdict = "✅ 投递" if should_apply else "❌ 跳过"
             print(f"  🤖 判断[{verdict}]({model_used}): {reason[:160].replace(chr(10), ' ')}")
 
             if not should_apply:
-                return False
+                return "reject"
 
             # 检查按钮：若"继续沟通"说明之前已发过消息 → 记录并跳过，不重复发
             chat_btn = await self.page.query_selector(
@@ -936,9 +937,9 @@ class BossZhipinAutomator:
             if chat_btn:
                 btn_text = (await chat_btn.text_content() or "").strip()
                 if "继续沟通" in btn_text:
-                    print("  ℹ️ 此前已沟通过该职位，记录并跳过（不重复发）")
+                    print(f"  ℹ️  [跳过-此前已沟通] {company} | {title}（记录，不重复发）")
                     record_application(self.applied_data, company, title, city)
-                    return False
+                    return "contacted"
 
             # 点"立即沟通"（选择器优先，UI-TARS 视觉兜底）→ 自动发打招呼语 = 投递
             clicked = await self._click_smart(
@@ -948,8 +949,8 @@ class BossZhipinAutomator:
                 f"chat_btn_{safe}.png",
             )
             if not clicked:
-                print("  ⚠️ 未能点击'立即沟通'按钮，跳过")
-                return False
+                print("  ⚠️  [跳过-未找到立即沟通按钮]")
+                return "fail"
             human_delay(2.5, 4.0)
 
             # 关闭"已向BOSS发送消息"弹窗（点X），避免遮罩挡住下一个职位的点击
@@ -957,14 +958,15 @@ class BossZhipinAutomator:
             await self._close_greet_dialog()
 
             # 记录投递（打招呼语已发送 = 完成投递）
+            print(f"  ✅ [投递成功] {company} | {title}")
             record_application(self.applied_data, company, title, city)
-            return True
+            return "applied"
 
         except Exception as e:
             print(f"  [ERROR] 投递失败: {e}")
             # 出错也尝试关掉可能存在的遮罩，避免影响后续
             await self._close_greet_dialog()
-            return False
+            return "fail"
 
     async def process_city(self, city: str):
         """
@@ -980,7 +982,12 @@ class BossZhipinAutomator:
         # 城市级去重：已完成的城市跳过
         if is_city_completed(self.applied_data, city):
             print(f"  ⏭️ 城市 [{city}] 之前已处理完成，跳过")
-            return
+            return {"city": city, "checked": 0, "applied": 0, "reject": 0,
+                    "dup": 0, "contacted": 0, "fail": 0, "skipped": True}
+
+        # 本城市统计
+        stat = {"city": city, "checked": 0, "applied": 0, "reject": 0,
+                "dup": 0, "contacted": 0, "fail": 0, "skipped": False}
 
         # 列表页逐页投递（直接用城市码导航列表页，并读 .city-label 确认城市；
         # 地图选城市的 switch_city_via_map 已保留但不在主流程调用——列表页
@@ -988,7 +995,7 @@ class BossZhipinAutomator:
         page_num = 1
         any_page_ok = False
         while page_num <= 5:  # 每个城市最多5页
-            print(f"\n  📄 第 {page_num} 页")
+            print(f"\n  📄 {city} 第 {page_num} 页")
             if not await self.goto_list(city, page_num):
                 if page_num == 1:
                     print(f"  ❌ 第1页无职位，跳过城市: {city}")
@@ -1004,9 +1011,15 @@ class BossZhipinAutomator:
                 print(f"  ⚠️ 本页无职位，停止翻页")
                 break
 
-            print(f"  找到 {len(jobs)} 个职位")
+            print(f"  📋 本页找到 {len(jobs)} 个职位，逐个检查...")
             for job in jobs:
-                await self.apply_to_job(job, city)
+                status = await self.apply_to_job(job, city)
+                stat["checked"] += 1
+                if status in stat:
+                    stat[status] += 1
+                # 实时累计进度提示
+                print(f"     ▸ [{city}] 进度：检查 {stat['checked']} | "
+                      f"投递 {stat['applied']} | 跳过 {stat['reject']+stat['dup']+stat['contacted']} | 失败 {stat['fail']}")
                 human_delay(DELAY_MIN, DELAY_MAX)
 
             page_num += 1
@@ -1014,6 +1027,16 @@ class BossZhipinAutomator:
         # 步骤3：标记城市完成（城市级去重）
         if any_page_ok:
             mark_city_completed(self.applied_data, city)
+
+        # 城市阶段总结
+        skipped_total = stat["reject"] + stat["dup"] + stat["contacted"]
+        print(f"\n  {'─'*54}")
+        print(f"  🏁 城市 [{city}] 阶段总结：")
+        print(f"     共检查 {stat['checked']} 个职位 → ✅ 投递 {stat['applied']} | "
+              f"⏭️ 跳过 {skipped_total}（不符合{stat['reject']}/已投{stat['dup']}/已沟通{stat['contacted']}）| "
+              f"⚠️ 失败 {stat['fail']}")
+        print(f"  {'─'*54}")
+        return stat
 
     async def run(self):
         """主运行入口"""
@@ -1047,15 +1070,38 @@ class BossZhipinAutomator:
                 print(f"\n📋 将处理以下城市（共{len(cities)}个）:")
                 print("  " + ", ".join(cities))
 
-                # 遍历城市
+                # 遍历城市，收集每城统计
+                city_stats = []
                 for i, city in enumerate(cities):
-                    print(f"\n[{i+1}/{len(cities)}] 处理城市: {city}")
-                    await self.process_city(city)
+                    print(f"\n[{i+1}/{len(cities)}] ▶▶▶ 切换到城市: {city}")
+                    st = await self.process_city(city)
+                    if st:
+                        city_stats.append(st)
 
                     # 城市间休息（防止触发反爬）
                     rest_time = random.uniform(5.0, 10.0)
                     print(f"\n  😴 城市间休息 {rest_time:.1f} 秒...")
                     await asyncio.sleep(rest_time)
+
+                # 全部城市总汇总
+                print("\n" + "█"*60)
+                print("📊 全部城市处理完毕 —— 总汇总")
+                print("█"*60)
+                tot = {"checked": 0, "applied": 0, "reject": 0, "dup": 0, "contacted": 0, "fail": 0}
+                print(f"  {'城市':<6}{'检查':>6}{'投递':>6}{'不符合':>7}{'已投':>6}{'已沟通':>7}{'失败':>6}")
+                for st in city_stats:
+                    if st.get("skipped"):
+                        print(f"  {st['city']:<6}{'(本次跳过-之前已完成)':>30}")
+                        continue
+                    for k in tot:
+                        tot[k] += st.get(k, 0)
+                    print(f"  {st['city']:<6}{st['checked']:>6}{st['applied']:>6}"
+                          f"{st['reject']:>7}{st['dup']:>6}{st['contacted']:>7}{st['fail']:>6}")
+                print(f"  {'─'*52}")
+                print(f"  {'合计':<6}{tot['checked']:>6}{tot['applied']:>6}"
+                      f"{tot['reject']:>7}{tot['dup']:>6}{tot['contacted']:>7}{tot['fail']:>6}")
+                print(f"\n  本次共检查 {tot['checked']} 个职位 → 投递 {tot['applied']} | "
+                      f"跳过 {tot['reject']+tot['dup']+tot['contacted']} | 失败 {tot['fail']}")
 
                 # 汇总报告
                 print("\n" + "="*60)
