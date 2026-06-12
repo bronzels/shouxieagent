@@ -61,65 +61,57 @@ SALARY_THRESHOLD = 30_000  # 单位：元/月
 
 def salary_covers_30k(salary_text: str) -> bool:
     """
-    判断薪资区间是否包含 30K（下限≤30000≤上限）。
+    判断薪资【上限是否 ≥ 30K(30000元/月)】——即该岗位能给到 30K 或更高就算满足。
+    （用户口径："上限高于30k；下限也高于30k当然可以"。只排除封顶<30K 的低薪岗。）
     支持格式：
-      - "25-50K"  → 下限25K, 上限50K → 25000-50000  → 包含30000 → True
-      - "30-60K·14薪" → 30000-60000 → True
-      - "20-40K"  → 20000-40000 → True
-      - "35-60K"  → 35000-60000 → 下限35K>30K → False
-      - "3-5万"   → 30000-50000 → True
-      - "30K以上" → 下限30K, 上限无穷 → True
-      - "5万以上" → 下限50000 → False
-      - "30000元/月" → 下限=上限=30000 → True
+      - "25-50K"  → 上限50K ≥ 30K → True
+      - "35-60K"  → 上限60K ≥ 30K → True（下限也>30K）
+      - "100-200K"→ 上限200K → True
+      - "20-35K"  → 上限35K → True
+      - "10-15K"  → 上限15K < 30K → False
+      - "3-5万"   → 上限50000 → True
+      - "30K以上"/"5万以上" → 上限开放 → True
+      - "8千-1.2万"→ 上限12000 < 30K → False
     解析失败时保守返回 False（宁可漏掉也不错投）。
     """
     if not salary_text:
         return False
 
     text = salary_text.strip()
-
-    # 归一化：去掉多薪/年薪等说明（·14薪、·15薪、/年 等），只看月薪主体
+    # 日薪/时薪不是月薪，直接排除（如 "100-150元/天"、实习日结、"200元/小时"）
+    if re.search(r"/?\s*[天日]|/\s*小?时|元/天|元/日|元/时", text):
+        return False
+    # 归一化：去掉多薪/年薪等说明（·14薪、/年 等），只看月薪主体
     text = re.sub(r"[··×x]\d+薪.*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"/年.*", "", text)
 
-    # 统一单位到"元/月"
-    # 先处理"万"单位，再处理"K"单位，避免混淆
-    # 格式1：XX-YY万（如 3-5万）
+    # 格式1：XX-YY万（如 3-5万）→ 看上限
     m = re.match(r"(\d+(?:\.\d+)?)\s*[-~–]\s*(\d+(?:\.\d+)?)\s*万", text)
     if m:
-        lo = float(m.group(1)) * 10_000
         hi = float(m.group(2)) * 10_000
-        return lo <= SALARY_THRESHOLD <= hi
+        return hi >= SALARY_THRESHOLD
 
-    # 格式2：XX-YYK（如 25-50K，大小写不限）
+    # 格式2：XX-YYK（如 25-50K）→ 看上限
     m = re.match(r"(\d+(?:\.\d+)?)\s*[-~–]\s*(\d+(?:\.\d+)?)\s*[Kk]", text)
     if m:
-        lo = float(m.group(1)) * 1_000
         hi = float(m.group(2)) * 1_000
-        return lo <= SALARY_THRESHOLD <= hi
+        return hi >= SALARY_THRESHOLD
 
-    # 格式3：XX万以上 / XX万+
-    m = re.match(r"(\d+(?:\.\d+)?)\s*万\s*(?:以上|\+)", text)
-    if m:
-        lo = float(m.group(1)) * 10_000
-        return lo <= SALARY_THRESHOLD  # 上限无穷，只需下限≤30000
+    # 格式3：XX万以上 / XX万+ → 上限开放，视为满足
+    if re.match(r"(\d+(?:\.\d+)?)\s*万\s*(?:以上|\+)", text):
+        return True
 
-    # 格式4：XXK以上 / XXK+
-    m = re.match(r"(\d+(?:\.\d+)?)\s*[Kk]\s*(?:以上|\+)", text)
-    if m:
-        lo = float(m.group(1)) * 1_000
-        return lo <= SALARY_THRESHOLD
+    # 格式4：XXK以上 / XXK+ → 上限开放，视为满足
+    if re.match(r"(\d+(?:\.\d+)?)\s*[Kk]\s*(?:以上|\+)", text):
+        return True
 
-    # 格式5：纯数字范围（如 30000-50000 元/月）
+    # 格式5：纯数字范围（如 30000-50000 元/月）→ 看上限
     m = re.match(r"(\d+)\s*[-~–]\s*(\d+)", text)
     if m:
-        lo = float(m.group(1))
         hi = float(m.group(2))
-        # 若数字较小（<500），可能是"千"单位，按K处理（如 25-50 → 25K-50K）
-        if hi < 500:
-            lo *= 1_000
+        if hi < 500:   # 较小数字按"千"→K 处理（如 25-50 即 25K-50K）
             hi *= 1_000
-        return lo <= SALARY_THRESHOLD <= hi
+        return hi >= SALARY_THRESHOLD
 
     # 解析失败 → 保守返回 False
     return False
@@ -212,6 +204,14 @@ class DamoxingSzAutomator(BossZhipinAutomator):
         self.search_keyword = DAMOXING_SEARCH_KEYWORD
         self.city = DAMOXING_CITY
         self.city_code = DAMOXING_CITY_CODE
+        # 薪资字体反爬 → 截图+多模态读真实薪资（含30K判断依赖准确薪资）
+        self.salary_resolver = self._resolve_salary
+
+    async def _resolve_salary(self, page) -> str:
+        """截图详情页 → 免费多模态模型读出真实薪资（应对 Boss直聘薪资字体反爬）。"""
+        import zhipin_apply as za
+        shot = await za.screenshot_page(page, "damoxing_salary.png")
+        return await za.read_salary_via_multimodal(shot)
 
     async def goto_list_damoxing(self, page_num: int = 1) -> bool:
         """
