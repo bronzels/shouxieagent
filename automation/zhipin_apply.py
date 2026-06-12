@@ -46,8 +46,8 @@ APPLIED_JOBS_FILE = Path(__file__).parent / "applied_jobs.json"
 SCREENSHOTS_DIR = Path(__file__).parent / "screenshots"
 SCREENSHOTS_DIR.mkdir(exist_ok=True)
 
-# 搜索关键词
-SEARCH_KEYWORD = "远程"
+# 搜索关键词（"远程 软件" 用空格分隔，更聚焦 IT 软件类远程岗）
+SEARCH_KEYWORD = "远程 软件"
 
 # 热门城市 → Boss直聘城市编码。
 # 这 14 个城市与"地图→请选择城市→热门城市"面板里展示的完全一致（实测核对），
@@ -578,6 +578,14 @@ class BossZhipinAutomator:
         try:
             await self.page.goto(map_url, wait_until="domcontentloaded", timeout=30000)
             human_delay(3.0, 5.0)
+            # 等待地图页城市选择器渲染（地图 JS 初始化较慢）
+            try:
+                await self.page.wait_for_selector(
+                    "[class*='city-sel'], .city-label", timeout=12000
+                )
+            except Exception:
+                pass
+            human_delay(1.0, 2.0)
         except Exception as e:
             print(f"  [WARN] 打开地图页失败: {e}")
             return False
@@ -654,19 +662,25 @@ class BossZhipinAutomator:
             for card in job_cards:
                 try:
                     job = {}
+                    # 实测卡片结构：.job-name(标题) .boss-name(公司) .job-salary(薪资)
+                    # .company-location(地点) .tag-list(标签)
                     title_el = await card.query_selector(".job-name")
                     if title_el:
                         job["title"] = (await title_el.text_content() or "").strip()
 
-                    company_el = await card.query_selector(".company-name, [class*='company-name']")
+                    company_el = await card.query_selector(".boss-name, .company-name")
                     if company_el:
                         job["company"] = (await company_el.text_content() or "").strip()
 
-                    salary_el = await card.query_selector(".job-salary, .salary, [class*='salary']")
+                    salary_el = await card.query_selector(".job-salary")
                     if salary_el:
                         job["salary"] = (await salary_el.text_content() or "").strip()
 
-                    tags_el = await card.query_selector_all(".tag-list li, .tag-item, [class*='tag']")
+                    loc_el = await card.query_selector(".company-location")
+                    if loc_el:
+                        job["location"] = (await loc_el.text_content() or "").strip()
+
+                    tags_el = await card.query_selector_all(".tag-list li")
                     job["tags"] = []
                     for tag in tags_el:
                         t = (await tag.text_content() or "").strip()
@@ -848,10 +862,9 @@ class BossZhipinAutomator:
             print(f"  ⏭️ 城市 [{city}] 之前已处理完成，跳过")
             return
 
-        # 步骤1：地图面板选城市（忠于用户要求；失败不致命，列表页用城市码兜底）
-        await self.switch_city_via_map(city)
-
-        # 步骤2：列表页逐页投递
+        # 列表页逐页投递（直接用城市码导航列表页，并读 .city-label 确认城市；
+        # 地图选城市的 switch_city_via_map 已保留但不在主流程调用——列表页
+        # 已能可靠确认城市，无需额外折腾地图页）
         page_num = 1
         any_page_ok = False
         while page_num <= 5:  # 每个城市最多5页
