@@ -1,0 +1,5 @@
+playwright>=1.40.0
+httpx>=0.25.0
+pyautogui>=0.9.54
+ui-tars>=0.1.0
+pillow>=10.0.0
