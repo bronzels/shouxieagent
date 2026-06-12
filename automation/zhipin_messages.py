@@ -172,6 +172,15 @@ SEL = {
         "button:has-text('确定')",
         "[class*='resume'] .btn-confirm",
     ],
+    # 情况1：聊天消息卡片里【自带的"发送简历"按钮】（对方发来可点的发简历卡片）
+    # TODO[调试确认]：在真实"对方索要简历"会话里核对消息内按钮选择器。
+    "resume_inmsg_btn": [
+        ".item-friend button:has-text('发送简历')",
+        "[class*='message'] button:has-text('发送简历')",
+        "[class*='msg'] a:has-text('发送简历')",
+        "[class*='card'] :has-text('发送简历')[class*='btn']",
+        "[class*='chat'] button:has-text('发送附件简历')",
+    ],
     # 聊天文本输入框（底部，"按Enter发送"）。TODO[调试确认]：实际选择器待核对。
     "chat_input": [
         "#chat-input",
@@ -561,14 +570,36 @@ class ZhipinMessageScanner:
         ver_name = "英文" if version == RESUME_EN else "中文"
         print(f"  📄 准备发送【{ver_name}】在线简历...", flush=True)
 
-        # 1) 点"发送简历"入口
-        ok = await self.click_smart(
-            SEL["send_resume_btn"],
-            "在聊天输入框上方/旁边的工具栏里，找到并点击'发送简历'按钮。",
-            "send_resume_entry.png",
-        )
+        # 1) 点"发送简历"入口。两种情况：
+        #    情况1：聊天里出现【自带"发送简历"按钮的消息卡片】→ 优先点消息内的按钮
+        #    情况2：没有这种按钮消息，对方只是文字表达想要简历 → 点聊天窗口边上的工具栏按钮
+        ok = False
+        inmsg = None
+        for sel in SEL["resume_inmsg_btn"]:
+            try:
+                el = await self.page.query_selector(sel)
+                if el and await el.is_visible():
+                    inmsg = el
+                    break
+            except Exception:
+                continue
+        if inmsg:
+            print("  → 情况1：点击聊天消息卡片里的'发送简历'按钮", flush=True)
+            try:
+                await inmsg.click()
+                ok = True
+            except Exception:
+                ok = False
         if not ok:
-            print("  [WARN] 未找到'发送简历'入口按钮（待调试确认选择器）", flush=True)
+            print("  → 情况2：消息内无按钮，点击聊天窗口工具栏的'发送简历'按钮", flush=True)
+            ok = await self.click_smart(
+                SEL["send_resume_btn"],
+                "聊天消息里没有发送简历的按钮。请在聊天输入框上方/旁边的工具栏里，"
+                "找到并点击'发送简历'按钮（不是聊天消息气泡里的按钮）。",
+                "send_resume_entry.png",
+            )
+        if not ok:
+            print("  [WARN] 两种方式都未找到'发送简历'入口（待调试确认选择器）", flush=True)
             return False
         za.human_delay(1.5, 2.5)
 
