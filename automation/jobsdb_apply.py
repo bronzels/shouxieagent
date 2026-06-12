@@ -683,83 +683,77 @@ class JobsDBAutomator:
         print("🔖 来源：Saved searches（保存的搜索）")
         print("=" * 60, flush=True)
 
-        # TODO: 调试时确认实际 URL；先尝试两个候选
-        saved_url = None
-        for candidate in [
-            "https://hk.jobsdb.com/saved-searches",
-            "https://hk.jobsdb.com/profile/saved-searches",
-            "https://hk.jobsdb.com/my-activity/saved-searches",
-        ]:
+        # 回到首页（根地址），点 Saved searches 区块里名为 "ai" 的保存搜索。
+        # 实测：a[data-automation^='savedSearchLink_']，href 含 /ai-jobs/。
+        if "hk.jobsdb.com" not in (self.page.url or "") or "/ai-jobs" not in (self.page.url or ""):
+            await self.page.goto("https://hk.jobsdb.com/", wait_until="domcontentloaded", timeout=40000)
+            human_delay(3.0, 5.0)
+
+        ai_link = None
+        for sel in ["a[data-automation^='savedSearchLink_'][href*='/ai-jobs/']",
+                    "a[href*='/ai-jobs/']"]:
             try:
-                await self.page.goto(candidate, wait_until="domcontentloaded", timeout=15000)
-                human_delay(2.0, 3.0)
-                # 简单判断是否正确跳转（非 404 / 非重定向回首页）
-                if "saved" in self.page.url.lower() or "search" in self.page.url.lower():
-                    saved_url = candidate
-                    break
-                # 也检查页面内容是否包含 saved search 相关关键词
-                content = await self.page.content()
-                if "saved search" in content.lower() or "saved-search" in content.lower():
-                    saved_url = candidate
+                el = await self.page.query_selector(sel)
+                if el:
+                    ai_link = el
                     break
             except Exception:
                 continue
+        if not ai_link:
+            print("  ❌ 首页未找到 'ai' 保存搜索链接，跳过此来源", flush=True)
+            return []
 
-        if not saved_url:
-            # 降级：通过首页导航菜单找 saved searches 入口
-            print("  ⚠️ 直接 URL 导航失败，尝试通过导航菜单进入 Saved searches...", flush=True)
-            await self.page.goto("https://hk.jobsdb.com/", wait_until="domcontentloaded", timeout=30000)
-            human_delay(2.0, 3.0)
-            clicked = await self._click_smart(
-                self.page,
-                [
-                    "a:has-text('Saved searches')",
-                    "[data-automation='saved-searches-link']",
-                    "a[href*='saved-search']",
-                ],
-                "找到导航菜单中的 'Saved searches' 链接，点击它。",
-                "jobsdb_nav_saved.png",
-            )
-            if not clicked:
-                print("  ❌ 无法进入 Saved searches，跳过此来源", flush=True)
-                return []
-            human_delay(2.0, 3.5)
+        ai_href = await ai_link.get_attribute("href") or ""
+        print(f"  🔖 进入 'ai' 保存搜索结果页: {ai_href[:70]}", flush=True)
+        await ai_link.click()
+        human_delay(3.0, 5.0)
+        await screenshot_page(self.page, "jobsdb_ai_results.png")
 
-        await screenshot_page(self.page, "jobsdb_saved_searches_page.png")
-
-        # 可能有多个保存的搜索，逐个抓取
+        # 逐页抓取 normalJob 卡，翻页到尾（page-next）。带页数上限防失控。
+        MAX_PAGES = 30
         all_jobs = []
+        seen = set()
+        for pno in range(1, MAX_PAGES + 1):
+            human_delay(1.5, 2.5)
+            raw = await self.page.evaluate(r"""() => {
+                const out=[];
+                for(const c of document.querySelectorAll("article[data-automation='normalJob']")){
+                    const tt=c.querySelector("[data-automation='jobTitle']");
+                    const co=c.querySelector("[data-automation='jobCompany'],[data-automation='jobAdvertiser']");
+                    const lk=c.querySelector("a[href*='/job/']");
+                    const applied=/applied/i.test(c.textContent||'');
+                    if(tt&&lk) out.push({title:tt.textContent.trim(),
+                        company:co?co.textContent.trim():'Unknown',
+                        href:lk.getAttribute('href')||'', already_applied:applied});
+                }
+                return out;
+            }""")
+            newn = 0
+            for r in raw:
+                if not r.get("href") or r["href"] in seen:
+                    continue
+                seen.add(r["href"])
+                all_jobs.append({"source": "SavedSearch:ai", "title": r["title"],
+                                 "company": r["company"], "salary": "",
+                                 "already_applied": r["already_applied"],
+                                 "detail_url": "https://hk.jobsdb.com" + r["href"]})
+                newn += 1
+            print(f"    第 {pno} 页: +{newn} 个（累计 {len(all_jobs)}）", flush=True)
 
-        # TODO: 调试时确认各个保存搜索的展开方式
-        # 方案A：每个保存搜索是一个可点击项，点击后展示结果列表
-        # 方案B：页面直接列出所有匹配职位
-        # 当前先尝试直接从页面提取职位卡片
-        jobs = await self._extract_job_cards_from_page("Saved searches")
-        all_jobs.extend(jobs)
+            # 翻下一页
+            nxt = await self.page.query_selector("[data-automation='page-next']")
+            if not nxt or not await nxt.is_visible() or not await nxt.is_enabled():
+                print("    已到最后一页", flush=True)
+                break
+            try:
+                await nxt.click()
+                await self.page.wait_for_load_state("domcontentloaded", timeout=20000)
+            except Exception:
+                break
+        else:
+            print(f"  ⚠️ 达到页数上限 {MAX_PAGES}，停止翻页（其余下次运行处理，去重不重复）", flush=True)
 
-        # 如果页面是保存搜索的"管理"页而非结果页，需要逐个点击搜索项
-        if not all_jobs:
-            print("  ℹ️  当前页可能是搜索管理页，尝试点击各保存搜索项...", flush=True)
-            search_items = await self.page.query_selector_all(
-                "[data-automation='saved-search-item'], "
-                ".saved-search-item, "
-                "li[class*='saved'], "
-                "a[href*='saved-search']"
-            )
-            for item in search_items[:5]:  # 最多处理5个保存搜索
-                try:
-                    name = (await item.text_content() or "搜索项").strip()[:30]
-                    print(f"  🔍 展开保存搜索: {name}", flush=True)
-                    await item.click()
-                    human_delay(2.0, 3.0)
-                    batch = await self._extract_job_cards_from_page(f"Saved:{name}")
-                    all_jobs.extend(batch)
-                    await self.page.go_back()
-                    human_delay(1.5, 2.5)
-                except Exception as e:
-                    print(f"  [WARN] 展开保存搜索失败: {e}", flush=True)
-
-        print(f"  ✅ 保存搜索共抓取 {len(all_jobs)} 个职位", flush=True)
+        print(f"  ✅ 'ai' 保存搜索共抓取 {len(all_jobs)} 个职位", flush=True)
         return all_jobs
 
     async def _extract_job_cards_from_page(self, source: str) -> list[dict]:

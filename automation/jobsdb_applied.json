@@ -1,0 +1,45 @@
+{
+  "jobs": [
+    {
+      "company": "ESD Services Limited (ESDlife)",
+      "position": "Senior AI Solution Engineer",
+      "status": "skipped_reject",
+      "source": "Recommended",
+      "salary": "",
+      "recorded_at": "2026-06-13 07:19:29"
+    },
+    {
+      "company": "QFPay Haojin Fintech Limited",
+      "position": "Full Stack Developer - Payment and Fintech",
+      "status": "skipped_reject",
+      "source": "Recommended",
+      "salary": "",
+      "recorded_at": "2026-06-13 07:19:49"
+    },
+    {
+      "company": "Hong Kong Productivity Council",
+      "position": "Consultant (LLM & AI for Science), Governance Efficacy & AI Solutions",
+      "status": "skipped_reject",
+      "source": "Recommended",
+      "salary": "",
+      "recorded_at": "2026-06-13 07:20:04"
+    },
+    {
+      "company": "ESD Services Limited (ESDlife)",
+      "position": "AI Engineer",
+      "status": "skipped_reject",
+      "source": "Recommended",
+      "salary": "",
+      "recorded_at": "2026-06-13 07:20:21"
+    },
+    {
+      "company": "Time Rise Engineering Ltd",
+      "position": "Software Developer / Programmer",
+      "status": "skipped_reject",
+      "source": "Recommended",
+      "salary": "",
+      "recorded_at": "2026-06-13 07:20:34"
+    }
+  ],
+  "last_updated": "2026-06-13 07:20:34"
+}
