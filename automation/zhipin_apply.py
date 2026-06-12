@@ -1063,9 +1063,6 @@ class BossZhipinAutomator:
                 print(f"📊 累计投递 {len(self.applied_data['jobs'])} 个职位")
                 print(f"🏙️ 已完成城市: {', '.join(self.applied_data.get('completed_cities', [])) or '无'}")
                 print(f"📁 记录已保存至: {APPLIED_JOBS_FILE}")
-                # 导出最终统计 CSV（文件名含投递时间+搜索内容，放 reports/ 目录）
-                csv_path = export_applications_csv(self.applied_data)
-                print(f"📑 最终统计CSV: {csv_path}")
                 print("="*60)
 
                 # 显示投递记录
@@ -1079,8 +1076,18 @@ class BossZhipinAutomator:
                 save_applied_jobs(self.applied_data)
 
             finally:
+                # 程序结束前（无论正常跑完/中断/报错）都把 json 转成 csv
+                try:
+                    save_applied_jobs(self.applied_data)
+                    csv_path = export_applications_csv(self.applied_data)
+                    print(f"📑 最终统计CSV已生成: {csv_path}")
+                except Exception as e:
+                    print(f"[WARN] 导出CSV失败: {e}")
                 print("\n🔚 关闭浏览器...")
-                await self.context.close()
+                try:
+                    await self.context.close()
+                except Exception:
+                    pass
 
 
 # ─── 入口 ─────────────────────────────────────────────────────────────────────
