@@ -2,3 +2,8 @@
 *.pyc
 models/
 !models/.gitkeep
+.claude/worktrees/
+automation/chrome_profile/
+automation/UI-TARS/
+automation/UI-TARS-desktop/
+*.whl

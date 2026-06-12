@@ -30,7 +30,8 @@ RUN sed -i 's|http://archive.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/s
 COPY llama_cpp_python-0.3.19-cp310-cp310-linux_x86_64.whl /tmp/
 RUN pip install --no-cache-dir /tmp/llama_cpp_python-0.3.19-cp310-cp310-linux_x86_64.whl && \
     pip install --no-cache-dir \
-        pydantic-settings sse-starlette starlette-context \
+        "fastapi[standard]" uvicorn pydantic-settings sse-starlette starlette-context \
+        diskcache jinja2 numpy \
         "openai>=1.0.0" \
         "ui-tars" \
         huggingface_hub modelscope \
