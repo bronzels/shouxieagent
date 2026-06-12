@@ -987,6 +987,9 @@ class BossZhipinAutomator:
         print(f"\n  🔎 检查职位: {company} | {title}")
         print(f"     薪资: {job.get('salary', 'N/A')} | 地点: {job.get('location','')} | 标签: {', '.join(job.get('tags', []))}")
 
+        # 暂存当前职位地点，供需要 location 的 verify_fn（如职位tab混合判断）读取
+        self._current_location = job.get("location", "")
+
         try:
             # 点职位卡 → 详情面板（检查阶段，快速延迟）
             card = job["element"]

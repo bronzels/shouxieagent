@@ -40,6 +40,7 @@ from zhipin_apply import (
     verify_job_is_it_remote,
     CITY_CODES,
     human_delay,
+    human_mouse_move_and_click,
     screenshot_page,
     export_applications_csv,
     save_applied_jobs,
@@ -141,8 +142,21 @@ class PositionTabsAutomator(BossZhipinAutomator):
       - run()：主流程（遍历 tab，跳过数据架构师）
     """
 
-    def __init__(self):
-        super().__init__(verify_fn=_verify_mixed_no_location)
+    def __init__(self, dry_run=False):
+        super().__init__(verify_fn=self._verify_mixed_bound, dry_run=dry_run)
+        # 深圳岗薪资同样字体反爬 → 截图+多模态读真实薪资（深圳路径 verify_llm_sz 需要）
+        self.salary_resolver = self._resolve_salary
+
+    async def _resolve_salary(self, page) -> str:
+        import zhipin_apply as za
+        shot = await za.screenshot_page(page, "postab_salary.png")
+        return await za.read_salary_via_multimodal(shot)
+
+    async def _verify_mixed_bound(self, title: str, desc: str, salary: str = "") -> tuple[bool, str]:
+        """绑定方法版混合判断：从 apply_to_job 暂存的 self._current_location 取地点，
+        传给 verify_mixed 以准确区分远程/深圳。"""
+        loc = getattr(self, "_current_location", "") or ""
+        return await verify_mixed(title, desc, salary, location=loc)
 
     async def navigate_to_jobs_home(self) -> bool:
         """
@@ -227,21 +241,34 @@ class PositionTabsAutomator(BossZhipinAutomator):
         """
         print(f"  点击 tab: 【{tab_name}】")
 
-        # TODO-SELECTOR: 以下选择器为最佳猜测，调试时需在真实页面确认
-        clicked = await self._click_smart(
-            self.page,
-            [
-                ".tab-list .tab-item",                  # TODO-SELECTOR: 候选1
-                "[class*='tab-list'] [class*='tab-item']",  # TODO-SELECTOR: 候选2
-                ".category-list .category-item",        # TODO-SELECTOR: 候选3
-                "[class*='category'] [class*='item']",  # TODO-SELECTOR: 候选4
-                "[class*='tab'] li",                    # TODO-SELECTOR: 候选5
-                "li[class*='tab']",                     # TODO-SELECTOR: 候选6
-            ],
-            f"找到职位列表页顶部的分类tab栏，点击名为「{tab_name}」的tab按钮。",
-            f"tab_click_{tab_name}.png",
-            require_text=tab_name,
-        )
+        # 实测：职位列表页顶部的求职期望 tab 是 a.expect-item，内含 span.text-content，
+        # 文本形如「机器学习(深圳)」（带地点后缀），故用【子串】匹配 tab_name。
+        clicked = False
+        try:
+            tabs = await self.page.query_selector_all("a.expect-item, .expect-item")
+            for t in tabs:
+                txt = (await t.text_content() or "").strip()
+                if tab_name in txt and await t.is_visible():
+                    print(f"    命中 tab 文本: 「{txt}」")
+                    bb = await t.bounding_box()
+                    if bb:
+                        await human_mouse_move_and_click(
+                            self.page, int(bb["x"] + bb["width"] / 2), int(bb["y"] + bb["height"] / 2))
+                    else:
+                        await t.click()
+                    clicked = True
+                    break
+        except Exception as e:
+            print(f"  [WARN] expect-item tab 点击异常: {e}")
+
+        # 选择器失败 → UI-TARS 视觉兜底
+        if not clicked:
+            clicked = await self._click_smart(
+                self.page,
+                ["a.expect-item", ".expect-item"],
+                f"找到职位列表页顶部的求职期望 tab 栏，点击名称包含「{tab_name}」的那个 tab。",
+                f"tab_click_{tab_name}.png",
+            )
         if not clicked:
             print(f"  [WARN] 未能点击 tab: {tab_name}")
             return False
@@ -428,6 +455,11 @@ def _build_arg_parser():
                         help="remote 方式下 UI-TARS endpoint URL")
     parser.add_argument("--uitars-key", default=None,
                         help="remote 方式下 UI-TARS x-api-key 鉴权 key")
+    parser.add_argument("--uitars-local-url", default=None,
+                        help="local 方式下本地/局域网 UI-TARS 推理地址（含 /v1），"
+                             "如 http://192.168.3.14:8000/v1")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="试运行：搜索+判断+打印，但不点立即沟通/不发招呼/不记录。")
     return parser
 
 
@@ -443,15 +475,20 @@ def main():
         za.UITARS_KEY = args.uitars_key
     if args.uitars_endpoint:
         za.UITARS_ENDPOINT = args.uitars_endpoint
+    if args.uitars_local_url:
+        za.UITARS_LOCAL_URL = args.uitars_local_url
 
     if za.UITARS_PROVIDER == "remote" and not za.UITARS_ENDPOINT:
         parser.error("--uitars-provider remote 需要同时指定 --uitars-endpoint")
 
     print(f"UI-TARS 提供方式: {za.UITARS_PROVIDER}"
-          + (f" | endpoint: {za.UITARS_ENDPOINT}" if za.UITARS_PROVIDER == "remote" else ""),
+          + (f" | endpoint: {za.UITARS_ENDPOINT}" if za.UITARS_PROVIDER == "remote" else "")
+          + (f" | local: {za.UITARS_LOCAL_URL}" if za.UITARS_PROVIDER == "local" else ""),
           flush=True)
+    if args.dry_run:
+        print("🧪 dry-run 试运行：只搜索+判断，不实际投递", flush=True)
 
-    asyncio.run(PositionTabsAutomator().run())
+    asyncio.run(PositionTabsAutomator(dry_run=args.dry_run).run())
 
 
 if __name__ == "__main__":
