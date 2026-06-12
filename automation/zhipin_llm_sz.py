@@ -207,14 +207,45 @@ class LlmSzAutomator(BossZhipinAutomator):
         self.search_keyword = LLM_SEARCH_KEYWORD
         self.city = LLM_CITY
         self.city_code = LLM_CITY_CODE
-        # 薪资字体反爬 → 截图+多模态读真实薪资（含30K判断依赖准确薪资）
+        # 薪资字体反爬解决方案：拦截列表 API joblist.json（返回明文 salaryDesc），
+        # 建 {职位名→明文薪资} 映射，投递判断时按职位名查映射。【不用截图OCR】。
+        self.salary_map = {}
         self.salary_resolver = self._resolve_salary
 
+    async def start_browser(self, playwright):
+        # 复用父类启动，再挂上 API 响应监听以捕获明文薪资
+        await super().start_browser(playwright)
+        self.page.on("response", self._on_joblist_response)
+
+    async def _on_joblist_response(self, resp):
+        """捕获 zhipin 列表 API（joblist.json）的明文 salaryDesc，按职位名建映射。"""
+        try:
+            url = resp.url
+            if "joblist.json" not in url and not ("zpgeek" in url and "search" in url and ".json" in url):
+                return
+            data = await resp.json()
+            zp = data.get("zpData", data)
+            jobs = None
+            if isinstance(zp, dict):
+                jobs = zp.get("jobList") or zp.get("jobs")
+            for j in (jobs or []):
+                name = (j.get("jobName") or "").strip()
+                sal = (j.get("salaryDesc") or "").strip()
+                comp = (j.get("brandName") or j.get("companyName") or "").strip()
+                if name and sal:
+                    self.salary_map[name] = sal
+                    self.salary_map[f"{comp}|{name}"] = sal  # 公司+职位做更精确的键
+        except Exception:
+            pass
+
     async def _resolve_salary(self, page) -> str:
-        """截图详情页 → 免费多模态模型读出真实薪资（应对 Boss直聘薪资字体反爬）。"""
-        import zhipin_apply as za
-        shot = await za.screenshot_page(page, "llm_salary.png")
-        return await za.read_salary_via_multimodal(shot)
+        """从拦截到的列表 API 明文薪资映射里，按当前职位名/公司查真实薪资（不截图OCR）。"""
+        title = getattr(self, "_current_title", "") or ""
+        company = getattr(self, "_current_company", "") or ""
+        if not title:
+            return ""
+        # 优先 公司+职位 精确键，再退回仅职位名
+        return self.salary_map.get(f"{company}|{title}") or self.salary_map.get(title, "")
 
     async def goto_list_llm(self, page_num: int = 1) -> bool:
         """

@@ -354,40 +354,9 @@ def _is_salary_obfuscated(salary_text: str) -> bool:
     return any("" <= ch <= "" for ch in (salary_text or ""))
 
 
-async def read_salary_via_multimodal(image_path: str) -> str:
-    """
-    用免费多模态模型从截图读取职位薪资（应对 Boss直聘字体反爬：薪资文本是私有区
-    乱码，但视觉渲染正常）。返回模型读出的薪资字符串（如 "20-35K" / "30-50K·14薪" /
-    "100-150元/天"），读不到返回 ""。
-    走 OpenRouter 免费多模态模型链（VERIFY_MODELS_MULTIMODAL）。
-    """
-    img_b64 = image_to_base64(image_path)
-    prompt = ("这是一张 Boss直聘 职位页截图。请只读取并返回该职位的【薪资范围】原文，"
-              "例如 '20-35K'、'30-50K·14薪'、'100-150元/天'、'15-25万' 等。"
-              "只返回薪资文本本身，不要任何多余解释；如果看不到薪资，返回 NA。")
-    payload = {
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                {"type": "text", "text": prompt},
-            ],
-        }],
-        "max_tokens": 40,
-    }
-    try:
-        result = await _post_openrouter(payload, models=VERIFY_MODELS_MULTIMODAL)
-        ans = (result["choices"][0]["message"]["content"] or "").strip()
-        # 清掉可能的引号/多余文字，保留薪资片段
-        m = re.search(r"[\d]+\s*[-~至]\s*[\d]+\s*[KkWw万元/天月]*[·\d薪]*", ans)
-        if m:
-            return m.group(0).strip()
-        if "NA" in ans.upper() or not ans:
-            return ""
-        return ans[:20]
-    except Exception as e:
-        print(f"  [WARN] 多模态读薪资失败: {e}")
-        return ""
+# 注：原 read_salary_via_multimodal（截图+多模态OCR读薪资）已删除。
+# 运行时禁止用多模态 OCR 抓文字（太慢太贵）。Boss直聘薪资字体反爬改为
+# 拦截列表 API joblist.json 取明文 salaryDesc（见 zhipin_llm_sz / zhipin_position_tabs）。
 
 
 async def verify_job_is_it_remote(job_title: str, job_desc: str, salary: str = "", image_path: str = None) -> tuple[bool, str]:
@@ -1053,6 +1022,9 @@ class BossZhipinAutomator:
 
         # 暂存当前职位地点，供需要 location 的 verify_fn（如职位tab混合判断）读取
         self._current_location = job.get("location", "")
+        # 暂存当前职位标题/公司，供需要的子类（如大模型深圳从API映射查明文薪资）使用
+        self._current_title = job.get("title", "")
+        self._current_company = job.get("company", "")
 
         try:
             # 点职位卡 → 详情面板（检查阶段，快速延迟）

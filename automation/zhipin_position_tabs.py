@@ -144,13 +144,40 @@ class PositionTabsAutomator(BossZhipinAutomator):
 
     def __init__(self, dry_run=False):
         super().__init__(verify_fn=self._verify_mixed_bound, dry_run=dry_run)
-        # 深圳岗薪资同样字体反爬 → 截图+多模态读真实薪资（深圳路径 verify_llm_sz 需要）
+        # 深圳岗薪资字体反爬：拦截列表 API joblist.json 取明文 salaryDesc（不截图OCR）
+        self.salary_map = {}
         self.salary_resolver = self._resolve_salary
 
+    async def start_browser(self, playwright):
+        await super().start_browser(playwright)
+        self.page.on("response", self._on_joblist_response)
+
+    async def _on_joblist_response(self, resp):
+        """捕获 zhipin 列表 API（joblist.json）明文 salaryDesc，按职位名建映射。"""
+        try:
+            url = resp.url
+            if "joblist.json" not in url and not ("zpgeek" in url and "search" in url and ".json" in url):
+                return
+            data = await resp.json()
+            zp = data.get("zpData", data)
+            jobs = zp.get("jobList") or zp.get("jobs") if isinstance(zp, dict) else None
+            for j in (jobs or []):
+                name = (j.get("jobName") or "").strip()
+                sal = (j.get("salaryDesc") or "").strip()
+                comp = (j.get("brandName") or j.get("companyName") or "").strip()
+                if name and sal:
+                    self.salary_map[name] = sal
+                    self.salary_map[f"{comp}|{name}"] = sal
+        except Exception:
+            pass
+
     async def _resolve_salary(self, page) -> str:
-        import zhipin_apply as za
-        shot = await za.screenshot_page(page, "postab_salary.png")
-        return await za.read_salary_via_multimodal(shot)
+        """从拦截到的列表 API 明文薪资映射查当前职位薪资（不截图OCR）。"""
+        title = getattr(self, "_current_title", "") or ""
+        company = getattr(self, "_current_company", "") or ""
+        if not title:
+            return ""
+        return self.salary_map.get(f"{company}|{title}") or self.salary_map.get(title, "")
 
     async def _verify_mixed_bound(self, title: str, desc: str, salary: str = "") -> tuple[bool, str]:
         """绑定方法版混合判断：从 apply_to_job 暂存的 self._current_location 取地点，
