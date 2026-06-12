@@ -980,7 +980,8 @@ class BossZhipinAutomator:
                     if not await el.is_visible():
                         continue
                     t = (await el.text_content() or "")
-                    if "温馨提示" in t or "沟通次数" in t or "打招呼" in t or "次数" in t:
+                    # 仅匹配真正的次数限制弹窗，避免误匹配"已向BOSS发送消息(含'打招呼'字样)"的招呼确认弹窗
+                    if "温馨提示" in t or "沟通次数" in t or "沟通机会" in t:
                         body = t
                         break
                 if body:
