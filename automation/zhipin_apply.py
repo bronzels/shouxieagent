@@ -49,12 +49,14 @@ UITARS_MODEL = "bytedance/ui-tars-1.5-7b"
 #   - "openrouter"（默认）：UI-TARS 走 OpenRouter，复用 OpenRouter key 与 _post_openrouter
 #   - "remote"：UI-TARS 走 Kaggle/Colab 等部署的 OpenAI 兼容 endpoint，
 #               key 放在 header 的 x-api-key 字段（不是 Authorization Bearer）
-#   - "local"：本地推理（用户搭建中，暂未实现），调用时抛 NotImplementedError 优雅跳过
+#   - "local"：本地/局域网 llama-cpp-python server（OpenAI 兼容），走 UITARS_LOCAL_URL
 UITARS_PROVIDER = "openrouter"   # openrouter / remote / local
 UITARS_ENDPOINT = ""             # remote 方式的完整 URL（如 https://xxx.ngrok.io/v1/chat/completions）
 UITARS_KEY = ""                  # remote 方式的鉴权 key（放 x-api-key header）
-# local 方式将来本地推理服务地址（OpenAI 兼容），当前未实现，仅占位
-UITARS_LOCAL_URL = "http://127.0.0.1:8000/v1/chat/completions"
+# local 方式：llama-cpp-python server 地址（/v1 前缀，不含 /chat/completions）
+# 例：本机 http://127.0.0.1:8000/v1，局域网服务器 http://192.168.3.14:8000/v1
+UITARS_LOCAL_URL = "http://127.0.0.1:8000/v1"
+UITARS_LOCAL_MODEL = None  # None → 自动从 /v1/models 取第一个
 # 验证职位用纯文本免费模型 fallback 链：免费模型 provider 容量经常被打满返回 429，
 # 依次尝试，哪个不限流用哪个（实时核验均为 :free）。Qwen 中文最强但最易限流，放第一位，
 # 后面用同样响应过的 gpt-oss / gemma / llama 兜底。
@@ -283,14 +285,42 @@ async def _post_uitars_remote(payload: dict) -> dict:
         return resp.json()
 
 
+async def _post_uitars_local(payload: dict) -> dict:
+    """
+    调用本地/局域网 llama-cpp-python server，复用 inference_client.UITarsClient。
+    - UITARS_LOCAL_URL：/v1 前缀，如 http://192.168.3.14:8000/v1
+    - frequency_penalty=1 由 UITarsClient 内部强制设置
+    - model 字段：UITARS_LOCAL_MODEL 或自动从 /v1/models 取第一个
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent / "ui-tars-server"))
+    from inference_client import UITarsClient as _UITarsClient
+    from openai import OpenAI as _OpenAI
+
+    model = UITARS_LOCAL_MODEL
+    if not model:
+        _c = _OpenAI(base_url=UITARS_LOCAL_URL, api_key="none", timeout=10.0)
+        model = _c.models.list().data[0].id
+
+    # 直接调用 OpenAI SDK（与 openrouter/_post_openrouter 结构完全对称）
+    _client = _OpenAI(base_url=UITARS_LOCAL_URL, api_key="none", timeout=120.0)
+    msgs = payload["messages"]
+    resp = _client.chat.completions.create(
+        model=model,
+        messages=msgs,
+        max_tokens=payload.get("max_tokens", 512),
+        frequency_penalty=1,   # 官方要求，强制覆盖
+    )
+    return {"choices": [{"message": {"content": resp.choices[0].message.content}}]}
+
+
 async def call_uitars(image_path: str, task_prompt: str) -> str:
     """
     调用 UI-TARS 模型（仅在选择器兜底时使用），返回含 Thought/Action 的响应。
     根据 UITARS_PROVIDER 分三种提供方式：
-      - openrouter：复用 _post_openrouter，走 OpenRouter（OpenRouter key）
+      - openrouter：走 OpenRouter（OpenRouter key）
       - remote    ：走 _post_uitars_remote，POST 到 UITARS_ENDPOINT，x-api-key 鉴权
-      - local     ：本地推理（用户搭建中），暂未实现 → 抛 NotImplementedError，
-                    上层 _click_smart 已 try/except 包裹，会优雅跳过 UI-TARS 兜底不崩溃
+      - local     ：走 _post_uitars_local，连接 UITARS_LOCAL_URL 的 llama-cpp-python server
     三种方式的 messages/payload 结构一致（OpenAI 兼容），响应均按
     result["choices"][0]["message"]["content"] 解析。
     """
@@ -313,13 +343,51 @@ async def call_uitars(image_path: str, task_prompt: str) -> str:
     if UITARS_PROVIDER == "remote":
         result = await _post_uitars_remote(payload)
     elif UITARS_PROVIDER == "local":
-        # 本地 UI-TARS 推理方式尚未实现，待用户搭建完成后补充 endpoint（UITARS_LOCAL_URL）
-        raise NotImplementedError(
-            f"本地 UI-TARS 推理方式尚未实现，待用户搭建完成后补充 endpoint（预留地址: {UITARS_LOCAL_URL}）"
-        )
+        result = await _post_uitars_local(payload)
     else:  # openrouter（默认）
         result = await _post_openrouter(payload)
     return result["choices"][0]["message"]["content"]
+
+
+def _is_salary_obfuscated(salary_text: str) -> bool:
+    """薪资文本是否被字体反爬混淆（含私有区字符 U+E000–U+F8FF）。"""
+    return any("" <= ch <= "" for ch in (salary_text or ""))
+
+
+async def read_salary_via_multimodal(image_path: str) -> str:
+    """
+    用免费多模态模型从截图读取职位薪资（应对 Boss直聘字体反爬：薪资文本是私有区
+    乱码，但视觉渲染正常）。返回模型读出的薪资字符串（如 "20-35K" / "30-50K·14薪" /
+    "100-150元/天"），读不到返回 ""。
+    走 OpenRouter 免费多模态模型链（VERIFY_MODELS_MULTIMODAL）。
+    """
+    img_b64 = image_to_base64(image_path)
+    prompt = ("这是一张 Boss直聘 职位页截图。请只读取并返回该职位的【薪资范围】原文，"
+              "例如 '20-35K'、'30-50K·14薪'、'100-150元/天'、'15-25万' 等。"
+              "只返回薪资文本本身，不要任何多余解释；如果看不到薪资，返回 NA。")
+    payload = {
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                {"type": "text", "text": prompt},
+            ],
+        }],
+        "max_tokens": 40,
+    }
+    try:
+        result = await _post_openrouter(payload, models=VERIFY_MODELS_MULTIMODAL)
+        ans = (result["choices"][0]["message"]["content"] or "").strip()
+        # 清掉可能的引号/多余文字，保留薪资片段
+        m = re.search(r"[\d]+\s*[-~至]\s*[\d]+\s*[KkWw万元/天月]*[·\d薪]*", ans)
+        if m:
+            return m.group(0).strip()
+        if "NA" in ans.upper() or not ans:
+            return ""
+        return ans[:20]
+    except Exception as e:
+        print(f"  [WARN] 多模态读薪资失败: {e}")
+        return ""
 
 
 async def verify_job_is_it_remote(job_title: str, job_desc: str, salary: str = "", image_path: str = None) -> tuple[bool, str]:
@@ -537,6 +605,10 @@ class BossZhipinAutomator:
         """
         self.verify_fn = verify_fn  # 可注入的职位判断函数
         self.dry_run = dry_run
+        # 可注入的薪资解析器：async (page) -> 真实薪资字符串。
+        # 用于应对字体反爬（薪资文本被混淆），由需要薪资过滤的任务（如大模型深圳）设置为
+        # 截图+多模态读取。默认 None，apply_to_job 直接用职位卡的 salary 文本。
+        self.salary_resolver = None
         self.applied_data = load_applied_jobs()
         self.status_data = zhipin_status.load_status()  # 对方回应状态（apply前过滤）
         self.page: Page = None
@@ -943,6 +1015,12 @@ class BossZhipinAutomator:
             # 选择职位判断函数：优先用注入的 verify_fn，未注入则用默认的远程判断
             _verify = self.verify_fn or verify_job_is_it_remote
             salary = job.get("salary", "")
+            # 薪资若被字体反爬混淆，且设置了薪资解析器 → 截图+多模态读真实薪资
+            if self.salary_resolver and _is_salary_obfuscated(salary):
+                real = await self.salary_resolver(self.page)
+                if real:
+                    print(f"  💰 薪资字体反爬，多模态读出: {real}（原始混淆文本已替换）")
+                    salary = real
 
             # 判断：正文够长 → 纯文本免费模型；正文仍抓不到 → 截图+免费多模态兜底
             # 注意：verify_job_is_it_remote 支持可选的 image_path 参数（多模态兜底）；
@@ -1225,14 +1303,11 @@ def _build_arg_parser():
     )
     parser.add_argument(
         "--uitars-provider", choices=["openrouter", "remote", "local"], default="openrouter",
-        help="UI-TARS 模型提供方式：openrouter（默认，走 OpenRouter）/ "
-             "remote（Kaggle/Colab 部署的 OpenAI 兼容 endpoint，x-api-key 鉴权）/ "
-             "local（本地推理，暂未实现）。",
+        help="UI-TARS 模型提供方式：openrouter（默认）/ remote（Kaggle/Colab x-api-key 鉴权）/ local（本地 llama-cpp-python server）。",
     )
     parser.add_argument(
         "--uitars-endpoint", default=None,
-        help="remote 方式下 UI-TARS 的完整 URL（如 https://xxxx.ngrok.io/v1/chat/completions）。"
-             "选 remote 时必填。",
+        help="remote 方式下 UI-TARS 的完整 URL（如 https://xxxx.ngrok.io/v1/chat/completions）。选 remote 时必填。",
     )
     parser.add_argument(
         "--uitars-key", default=None,
@@ -1240,15 +1315,18 @@ def _build_arg_parser():
     )
     parser.add_argument(
         "--uitars-local-url", default=UITARS_LOCAL_URL,
-        help=f"local 方式下本地 UI-TARS 推理服务地址（OpenAI 兼容），当前未实现，仅占位预留。"
-             f"默认 {UITARS_LOCAL_URL}。",
+        help=f"local 方式下 llama-cpp-python server 地址（/v1 前缀）。默认 {UITARS_LOCAL_URL}。示例：http://192.168.3.14:8000/v1",
+    )
+    parser.add_argument(
+        "--uitars-local-model", default=None,
+        help="local 方式下模型名称（通常是 GGUF 文件路径）。默认 None → 自动从 /v1/models 取第一个。",
     )
     return parser
 
 
 def main():
     """解析命令行参数，赋值到模块级全局变量后启动自动投递。"""
-    global OPENROUTER_API_KEY, UITARS_PROVIDER, UITARS_ENDPOINT, UITARS_KEY, UITARS_LOCAL_URL
+    global OPENROUTER_API_KEY, UITARS_PROVIDER, UITARS_ENDPOINT, UITARS_KEY, UITARS_LOCAL_URL, UITARS_LOCAL_MODEL
 
     parser = _build_arg_parser()
     args = parser.parse_args()
@@ -1260,6 +1338,7 @@ def main():
     # UI-TARS 提供方式
     UITARS_PROVIDER = args.uitars_provider
     UITARS_LOCAL_URL = args.uitars_local_url
+    UITARS_LOCAL_MODEL = args.uitars_local_model
     if args.uitars_key:
         UITARS_KEY = args.uitars_key
     if args.uitars_endpoint:
@@ -1269,13 +1348,12 @@ def main():
     if UITARS_PROVIDER == "remote" and not UITARS_ENDPOINT:
         parser.error("--uitars-provider remote 需要同时指定 --uitars-endpoint")
 
-    # local 方式提示尚未实现
     if UITARS_PROVIDER == "local":
-        print("⚠️ 本地 UI-TARS 推理方式尚未实现，待用户搭建完成后补充 endpoint。"
-              f"（预留地址: {UITARS_LOCAL_URL}）UI-TARS 视觉兜底将被优雅跳过。", flush=True)
-
-    print(f"⚙️ UI-TARS 提供方式: {UITARS_PROVIDER}"
-          + (f" | endpoint: {UITARS_ENDPOINT}" if UITARS_PROVIDER == "remote" else ""), flush=True)
+        print(f"⚙️ UI-TARS 提供方式: local | server: {UITARS_LOCAL_URL}", flush=True)
+    elif UITARS_PROVIDER == "remote":
+        print(f"⚙️ UI-TARS 提供方式: remote | endpoint: {UITARS_ENDPOINT}", flush=True)
+    else:
+        print(f"⚙️ UI-TARS 提供方式: openrouter", flush=True)
 
     asyncio.run(BossZhipinAutomator().run())
 

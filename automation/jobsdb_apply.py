@@ -48,6 +48,7 @@ from zhipin_apply import (
     image_to_base64,
     UITARS_MODEL,
     UITARS_LOCAL_URL,
+    UITARS_LOCAL_MODEL,
 )
 
 # ─── 配置 ────────────────────────────────────────────────────────────────────────
@@ -1355,7 +1356,11 @@ def _build_arg_parser():
     )
     parser.add_argument(
         "--uitars-local-url", default=UITARS_LOCAL_URL,
-        help=f"local 方式本地推理地址（暂未实现，占位预留）。默认: {UITARS_LOCAL_URL}",
+        help=f"local 方式 llama-cpp-python server 地址（/v1 前缀）。默认: {UITARS_LOCAL_URL}。示例：http://192.168.3.14:8000/v1",
+    )
+    parser.add_argument(
+        "--uitars-local-model", default=None,
+        help="local 方式模型名称（GGUF 路径）。默认 None → 自动从 /v1/models 取第一个。",
     )
     return parser
 
@@ -1387,13 +1392,18 @@ def main():
 
     if args.uitars_local_url:
         _za.UITARS_LOCAL_URL = args.uitars_local_url
+    if args.uitars_local_model:
+        _za.UITARS_LOCAL_MODEL = args.uitars_local_model
 
     if UITARS_PROVIDER == "remote" and not UITARS_ENDPOINT:
         parser.error("--uitars-provider remote 需要同时指定 --uitars-endpoint")
 
     if UITARS_PROVIDER == "local":
-        print(f"⚠️ 本地 UI-TARS 推理方式尚未实现，UI-TARS 视觉兜底将被优雅跳过。"
-              f"（预留地址: {args.uitars_local_url}）", flush=True)
+        print(f"⚙️ UI-TARS 提供方式: local | server: {args.uitars_local_url}", flush=True)
+    elif UITARS_PROVIDER == "remote":
+        print(f"⚙️ UI-TARS 提供方式: remote | endpoint: {UITARS_ENDPOINT}", flush=True)
+    else:
+        print(f"⚙️ UI-TARS 提供方式: openrouter", flush=True)
 
     print(f"⚙️ UI-TARS 提供方式: {UITARS_PROVIDER}"
           + (f" | endpoint: {UITARS_ENDPOINT}" if UITARS_PROVIDER == "remote" else ""),
