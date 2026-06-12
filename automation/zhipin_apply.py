@@ -154,105 +154,114 @@ async def screenshot_page(page: Page, filename: str) -> str:
 
 # ─── OpenRouter API 调用 ──────────────────────────────────────────────────────
 
+async def _post_openrouter(payload: dict, max_retries: int = 4) -> dict:
+    """
+    调用 OpenRouter，带 429/5xx 指数退避重试，缓解限流。
+    """
+    delay = 5.0
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                resp = await client.post(
+                    f"{OPENROUTER_BASE_URL}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                if resp.status_code in (429, 500, 502, 503):
+                    last_err = f"{resp.status_code}"
+                    print(f"  ⏳ OpenRouter {resp.status_code} 限流/错误，{delay:.0f}s 后重试 ({attempt+1}/{max_retries})", flush=True)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 60)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as e:
+            raise
+        except Exception as e:
+            last_err = str(e)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60)
+    raise RuntimeError(f"OpenRouter 多次重试仍失败: {last_err}")
+
+
 async def call_uitars(image_path: str, task_prompt: str) -> str:
     """
-    调用 OpenRouter UI-TARS 模型，给定截图和任务描述，返回模型响应（包含 Thought 和 Action）
+    调用 OpenRouter UI-TARS 模型（仅在选择器兜底时使用），返回含 Thought/Action 的响应。
     """
     from ui_tars.prompt import COMPUTER_USE_DOUBAO
 
     img_b64 = image_to_base64(image_path)
-    prompt_text = COMPUTER_USE_DOUBAO.format(
-        instruction=task_prompt, language="Chinese"
-    )
-
-    messages = [
-        {
+    prompt_text = COMPUTER_USE_DOUBAO.format(instruction=task_prompt, language="Chinese")
+    payload = {
+        "model": UITARS_MODEL,
+        "messages": [{
             "role": "user",
             "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{img_b64}"},
-                },
-                {
-                    "type": "text",
-                    "text": prompt_text,
-                },
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                {"type": "text", "text": prompt_text},
             ],
-        },
-    ]
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            f"{OPENROUTER_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": UITARS_MODEL,
-                "messages": messages,
-                "max_tokens": 512,
-            },
-        )
-        resp.raise_for_status()
-        result = resp.json()
-        return result["choices"][0]["message"]["content"]
+        }],
+        "max_tokens": 512,
+    }
+    result = await _post_openrouter(payload)
+    return result["choices"][0]["message"]["content"]
 
 
-async def verify_job_is_it_remote(image_path: str, job_title: str, job_desc: str) -> tuple[bool, str]:
+async def verify_job_is_it_remote(job_title: str, job_desc: str, image_path: str = None) -> tuple[bool, str]:
     """
-    使用 Gemini 多模态模型验证职位是否为 IT 软件类远程/WFH 工作
-    返回 (is_valid, reason)
+    用 Gemini 判断职位是否为「IT 软件/技术开发类」且「支持远程/WFH」。
+    以职位标题 + 正文描述文本为主依据（截图可选辅助）。
+    采用严格提示词：只有核心岗位是软件/IT技术开发，且支持远程，才判定投递。
+    返回 (should_apply, reason)
     """
-    img_b64 = image_to_base64(image_path)
+    prompt = f"""你是一个严格的招聘职位筛选助手。请判断下面这个职位是否【同时满足】两个条件，只有都满足才建议投递。
 
-    prompt = f"""请分析这个招聘职位，判断它是否满足以下所有条件：
-1. 属于IT/互联网/软件/技术类工作（包括：软件开发、产品、设计、测试、运维、数据、AI等）
-2. 明确支持远程办公（WFH）或全程在家工作
+【条件1：必须是 IT 软件/技术开发类岗位】
+✅ 算作 IT 软件类（核心工作是写代码/做技术开发）：
+   后端/前端/全栈/移动端开发、软件工程师、程序员、测试工程师、
+   运维/DevOps/SRE、数据工程师、算法工程师、机器学习工程师、
+   AI 工程师（做模型/系统开发的）、嵌入式开发、安全工程师、
+   技术架构师、技术支持工程师（偏技术）
+❌ 不算 IT 软件类（即使提到 AI/互联网/远程也要排除）：
+   数据标注/AI标注师、内容运营/用户运营/活动运营、产品经理、
+   销售/市场/BD、猎头/HR/招聘、文案/写作/编辑/翻译、客服、
+   平面/视觉设计（非前端）、教师/培训、医学/医疗相关、
+   金融分析师、财务、行政、兼职文稿、需要医学/法律/金融等非IT专业背景的岗位
+
+【条件2：必须支持远程办公 / WFH / 居家办公】
+   职位标题或描述中明确提到"远程""可远程""居家办公""WFH""在家办公"等。
 
 职位标题：{job_title}
-职位描述摘要：{job_desc}
 
-请回答：
-- 是否IT软件类：是/否
-- 是否支持远程/WFH：是/否
-- 综合判断：符合/不符合
-- 理由：（一句话）
+职位描述正文：
+{job_desc[:1500]}
 
-如果截图中有职位信息，也请参考截图内容判断。"""
+请严格按以下格式回答（一定要有"结论"行）：
+是否IT软件技术开发类：是/否（并说明判断依据，如具体技术栈/开发职责）
+是否支持远程：是/否
+结论：投递 / 不投递
+理由：（一句话，说明关键原因）"""
 
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{img_b64}"},
-                },
-                {"type": "text", "text": prompt},
-            ],
-        }
-    ]
+    content = [{"type": "text", "text": prompt}]
+    if image_path:
+        img_b64 = image_to_base64(image_path)
+        content.insert(0, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}})
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            f"{OPENROUTER_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": VERIFY_MODEL,
-                "messages": messages,
-                "max_tokens": 256,
-            },
-        )
-        resp.raise_for_status()
-        result = resp.json()
-        answer = result["choices"][0]["message"]["content"]
+    payload = {
+        "model": VERIFY_MODEL,
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": 400,
+    }
+    result = await _post_openrouter(payload)
+    answer = result["choices"][0]["message"]["content"]
 
-    is_valid = "综合判断：符合" in answer or ("符合" in answer and "不符合" not in answer)
-    return is_valid, answer
+    # 严格解析：必须出现"结论：投递"，且不能同时出现"不投递"
+    should_apply = ("结论：投递" in answer or "结论: 投递" in answer) and "不投递" not in answer
+    return should_apply, answer
 
 
 # ─── UI-TARS 动作解析与执行 ───────────────────────────────────────────────────
@@ -697,14 +706,55 @@ class BossZhipinAutomator:
 
         return jobs
 
+    async def _extract_job_description(self) -> str:
+        """
+        提取右侧详情面板的职位描述正文，并清洗反爬注入的 CSS 噪音。
+        """
+        desc = ""
+        try:
+            el = await self.page.query_selector(".job-detail-box, .job-detail")
+            if el:
+                desc = await el.text_content() or ""
+        except Exception:
+            pass
+        # 去掉反爬注入的 CSS 规则（形如 .xxx{display:none!important;}）
+        desc = re.sub(r"\.[a-zA-Z0-9_-]+\{[^}]*\}", "", desc)
+        # 取"职位描述"之后的正文（若有）
+        if "职位描述" in desc:
+            desc = desc.split("职位描述", 1)[1]
+        desc = re.sub(r"\s+", " ", desc).strip()
+        return desc
+
+    async def _close_greet_dialog(self) -> bool:
+        """
+        关闭"已向BOSS发送消息"弹窗（greet-boss-dialog）。
+        该弹窗的遮罩 .greet-boss-layer 会拦截后续点击，必须先关掉。
+        点 X（.icon-close）关闭；失败则按 Escape。
+        """
+        try:
+            x = await self.page.query_selector(".greet-boss-dialog .icon-close, .greet-boss-dialog .close")
+            if x and await x.is_visible():
+                await x.click()
+                human_delay(0.8, 1.5)
+                return True
+        except Exception:
+            pass
+        # 兜底：按 Escape
+        try:
+            await self.page.keyboard.press("Escape")
+            human_delay(0.5, 1.0)
+        except Exception:
+            pass
+        return False
+
     async def apply_to_job(self, job: dict, city: str) -> bool:
         """
-        对单个职位进行投递（Boss直聘是聊天式投递）：
-        1. 点击职位卡 → 右侧详情面板更新（同一页面，非新标签页）
-        2. 截图详情面板 → Gemini 验证是否 IT 软件类远程职位
-        3. 点击"立即沟通"开启与招聘者的对话
-        4. 在对话中发送打招呼语，并通过 UI-TARS 发送"刘先生"中文简历
-        5. 记录投递，关闭对话回到列表
+        对单个职位投递（Boss直聘聊天式）：
+        1. 点职位卡 → 右侧详情面板更新（同页）
+        2. 抓取标题+正文描述 → Gemini 严格判断是否 IT软件类 且 远程
+        3. 通过 → 点"立即沟通"（自动发打招呼语 = 完成投递）
+        4. 关闭"已向BOSS发送消息"弹窗（点X，避免遮罩挡住后续点击）
+        5. 记录投递；按钮若是"继续沟通"说明之前已发过消息 → 记录并跳过不重复
         """
         company = job.get("company", "")
         title = job.get("title", "")
@@ -714,50 +764,41 @@ class BossZhipinAutomator:
             return False
 
         print(f"\n  📋 处理职位: {company} | {title}")
-        print(f"     薪资: {job.get('salary', 'N/A')} | 标签: {', '.join(job.get('tags', []))}")
+        print(f"     薪资: {job.get('salary', 'N/A')} | 地点: {job.get('location','')} | 标签: {', '.join(job.get('tags', []))}")
 
         try:
-            # 点击职位卡 → 右侧详情面板更新（同页）
+            # 点职位卡 → 详情面板
             card = job["element"]
             await card.scroll_into_view_if_needed()
             human_delay(0.5, 1.2)
             await card.click()
             human_delay(2.0, 3.5)
 
-            # 获取详情面板的职位描述文本
-            desc = ""
-            try:
-                desc_el = await self.page.query_selector(
-                    ".job-detail-box, .job-detail, [class*='job-detail']"
-                )
-                if desc_el:
-                    desc = (await desc_el.text_content() or "")[:600]
-            except Exception:
-                pass
-
-            # 截图详情面板用于验证
+            # 抓取职位描述正文
+            desc = await self._extract_job_description()
             safe = re.sub(r"[^\w一-龥]", "_", f"{company}_{title}")[:60]
             shot_path = await screenshot_page(self.page, f"job_{safe}.png")
 
-            # Gemini 验证是否 IT 软件类远程
-            is_valid, reason = await verify_job_is_it_remote(shot_path, title, desc)
-            print(f"  🤖 Gemini验证: {'✅ 符合' if is_valid else '❌ 不符合'} | {reason[:120]}")
+            # Gemini 严格判断（标题+正文为主，截图辅助）
+            should_apply, reason = await verify_job_is_it_remote(title, desc, shot_path)
+            verdict = "✅ 投递" if should_apply else "❌ 不投递"
+            print(f"  🤖 判断[{verdict}]: {reason[:160].replace(chr(10), ' ')}")
 
-            if not is_valid:
+            if not should_apply:
                 return False
 
-            # 先检查按钮文本：若是"继续沟通"说明之前已沟通过 → 记录并跳过
+            # 检查按钮：若"继续沟通"说明之前已发过消息 → 记录并跳过，不重复发
             chat_btn = await self.page.query_selector(
                 "a:has-text('立即沟通'), .op-btn-chat, a:has-text('继续沟通')"
             )
             if chat_btn:
                 btn_text = (await chat_btn.text_content() or "").strip()
                 if "继续沟通" in btn_text:
-                    print("  ℹ️ 该职位此前已沟通过，记录并跳过")
+                    print("  ℹ️ 此前已沟通过该职位，记录并跳过（不重复发）")
                     record_application(self.applied_data, company, title, city)
                     return False
 
-            # 点击"立即沟通"（选择器优先，UI-TARS 视觉兜底）
+            # 点"立即沟通"（选择器优先，UI-TARS 视觉兜底）→ 自动发打招呼语 = 投递
             clicked = await self._click_smart(
                 self.page,
                 ["a:has-text('立即沟通')", ".op-btn-chat"],
@@ -767,84 +808,21 @@ class BossZhipinAutomator:
             if not clicked:
                 print("  ⚠️ 未能点击'立即沟通'按钮，跳过")
                 return False
-            human_delay(APPLY_DELAY_MIN, APPLY_DELAY_MAX)
+            human_delay(2.5, 4.0)
 
-            # 处理对话框 + 发送简历
-            await self._send_greeting_and_resume(company, title)
+            # 关闭"已向BOSS发送消息"弹窗（点X），避免遮罩挡住下一个职位的点击
+            await screenshot_page(self.page, "greet_dialog.png")
+            await self._close_greet_dialog()
 
-            # 记录投递
+            # 记录投递（打招呼语已发送 = 完成投递）
             record_application(self.applied_data, company, title, city)
             return True
 
         except Exception as e:
             print(f"  [ERROR] 投递失败: {e}")
+            # 出错也尝试关掉可能存在的遮罩，避免影响后续
+            await self._close_greet_dialog()
             return False
-
-    async def _send_greeting_and_resume(self, company: str, title: str):
-        """
-        点击立即沟通后处理对话窗口：
-        - Boss直聘点击立即沟通后通常会跳转到聊天页/弹出聊天框，并自动发送打招呼语
-        - 在聊天工具栏找到"发送简历"，弹出简历选择时用 UI-TARS 选"刘先生"中文简历
-        """
-        human_delay(2.0, 3.5)
-
-        # 可能打开了新标签页（聊天页），切到最新页
-        pages = self.context.pages
-        chat_page = pages[-1] if pages else self.page
-        try:
-            await chat_page.wait_for_load_state("domcontentloaded", timeout=8000)
-        except Exception:
-            pass
-        human_delay(1.5, 2.5)
-
-        await screenshot_page(chat_page, "chat_opened.png")
-
-        # 找"发送简历"入口（聊天工具栏按钮或快捷气泡）
-        try:
-            resume_entry = await chat_page.query_selector(
-                "*:has-text('发送简历'), *:has-text('发送附件简历'), [class*='resume']"
-            )
-        except Exception:
-            resume_entry = None
-
-        if resume_entry:
-            try:
-                await resume_entry.click()
-                human_delay(1.5, 2.5)
-            except Exception:
-                pass
-
-        # 用 UI-TARS 在弹窗中选"刘先生"中文简历并确认发送
-        shot1 = await screenshot_page(chat_page, "resume_dialog.png")
-        resp1 = await call_uitars(
-            shot1,
-            "如果出现简历选择弹窗，找到名字以'刘先生'开头的中文版简历并点击选中它；"
-            "如果没有弹窗但有'发送简历'按钮，则点击该按钮。",
-        )
-        act1 = parse_uitars_action(resp1, chat_page.viewport_size["width"], chat_page.viewport_size["height"])
-        if act1:
-            await execute_action_on_page(chat_page, act1)
-            human_delay(1.5, 2.5)
-
-            shot2 = await screenshot_page(chat_page, "resume_confirm.png")
-            resp2 = await call_uitars(
-                shot2,
-                "找到确认发送简历的按钮（如'发送'/'确定'/'确认发送'）并点击，完成简历投递。",
-            )
-            act2 = parse_uitars_action(resp2, chat_page.viewport_size["width"], chat_page.viewport_size["height"])
-            if act2:
-                await execute_action_on_page(chat_page, act2)
-                human_delay(1.5, 2.5)
-
-        await screenshot_page(chat_page, "after_send_resume.png")
-
-        # 若聊天是新标签页，发送完关闭它回到列表页
-        if chat_page is not self.page:
-            try:
-                await chat_page.close()
-                human_delay(1.0, 2.0)
-            except Exception:
-                pass
 
     async def process_city(self, city: str):
         """
