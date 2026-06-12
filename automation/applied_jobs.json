@@ -509,6 +509,108 @@
       "position": "大模型算法",
       "city": "深圳",
       "applied_at": "2026-06-12 23:02:03"
+    },
+    {
+      "company": "某中型人工智能公司",
+      "position": "高级ai工程师",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:27:29"
+    },
+    {
+      "company": "中策大数据",
+      "position": "ai专家",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:28:03"
+    },
+    {
+      "company": "某大型医疗健康上市公司（国企背景）",
+      "position": "AI架构主任",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:28:35"
+    },
+    {
+      "company": "某知名互联网公司",
+      "position": "AI平台开发工程师/专家",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:29:09"
+    },
+    {
+      "company": "某大型互联网公司",
+      "position": "大模型应用算法专家",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:29:45"
+    },
+    {
+      "company": "某大型消费电子公司",
+      "position": "AI开发",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:30:14"
+    },
+    {
+      "company": "深圳某大型保险上市公司",
+      "position": "大模型应用工程师",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:31:05"
+    },
+    {
+      "company": "某中型人工智能公司",
+      "position": "AI方向实习生-base北上广或居家都可",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:31:41"
+    },
+    {
+      "company": "云智达创",
+      "position": "大模型应用开发工程师（Agent 方向）",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:32:40"
+    },
+    {
+      "company": "蓝岸一凝",
+      "position": "agent全栈工程师",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:33:12"
+    },
+    {
+      "company": "深眸智现",
+      "position": "后端开发工程师（AI创新应用）",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:33:39"
+    },
+    {
+      "company": "某电子商务公司",
+      "position": "高级全栈开发工程师（AI开发经验・偏后端）",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:34:09"
+    },
+    {
+      "company": "某中型人工智能研发公司",
+      "position": "agent全栈工程师",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:34:35"
+    },
+    {
+      "company": "上海某小型汽车研发/制造公司",
+      "position": "效能研发工程师/架构师（DevOps AI方向）",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:35:00"
+    },
+    {
+      "company": "深圳某小型人工智能获资本融资公司",
+      "position": "全栈开发工程师（CTO储备）",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:35:50"
+    },
+    {
+      "company": "城觅科技",
+      "position": "AI原生工程师",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:36:19"
+    },
+    {
+      "company": "合生和",
+      "position": "AI开发经理【50-80w＋16年不拖薪】",
+      "city": "tab-机器学习",
+      "applied_at": "2026-06-12 23:36:56"
     }
   ],
   "completed_cities": [
@@ -527,5 +629,5 @@
     "郑州",
     "重庆"
   ],
-  "last_updated": "2026-06-12 23:02:03"
+  "last_updated": "2026-06-12 23:36:56"
 }

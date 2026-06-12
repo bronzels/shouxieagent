@@ -605,6 +605,7 @@ class BossZhipinAutomator:
         """
         self.verify_fn = verify_fn  # 可注入的职位判断函数
         self.dry_run = dry_run
+        self.stop_requested = False  # 当日沟通次数用完时置 True，各处理循环检测后停止
         # 可注入的薪资解析器：async (page) -> 真实薪资字符串。
         # 用于应对字体反爬（薪资文本被混淆），由需要薪资过滤的任务（如大模型深圳）设置为
         # 截图+多模态读取。默认 None，apply_to_job 直接用职位卡的 salary 文本。
@@ -960,6 +961,68 @@ class BossZhipinAutomator:
             pass
         return False
 
+    async def _handle_limit_popup(self) -> str:
+        """
+        处理 zhipin 每日沟通次数限制弹窗（"温馨提示"）：
+          - 若提示"还剩 X 次"等（未用完）→ 点"好/我知道了/确定"关闭，返回 "dismissed"
+          - 若提示"当日/今日沟通次数已用完/已达上限"→ 设置停止标志，返回 "exhausted"
+          - 没有此弹窗 → 返回 ""
+        该弹窗会遮挡后续点击，必须先 dismiss。
+        """
+        try:
+            # 弹窗文本：实测每日限制弹窗类名为 .chat-block-dialog（遮罩 .chat-block-layer）。
+            # 也兼容其他含"温馨提示/沟通次数"的对话框。
+            body = ""
+            for sel in [".chat-block-dialog", "[class*='chat-block']",
+                        "[class*='dialog']", "[class*='modal']", "[class*='popup']"]:
+                els = await self.page.query_selector_all(sel)
+                for el in els:
+                    if not await el.is_visible():
+                        continue
+                    t = (await el.text_content() or "")
+                    if "温馨提示" in t or "沟通次数" in t or "打招呼" in t or "次数" in t:
+                        body = t
+                        break
+                if body:
+                    break
+            if not body:
+                return ""
+
+            # 判断是否次数用完
+            exhausted_kw = ["已用完", "用完了", "已达上限", "达到上限", "次数已用尽",
+                            "今日沟通次数已用完", "当日沟通次数已用完", "明天再来", "已用尽"]
+            if any(k in body for k in exhausted_kw):
+                print(f"  🛑 检测到【当日沟通次数已用完】弹窗，停止脚本（明天再跑）。提示原文片段: {body[:60]}", flush=True)
+                self.stop_requested = True
+                return "exhausted"
+
+            # 否则是"还剩X次"的温馨提示 → 点"好"关闭
+            print(f"  ℹ️ 温馨提示弹窗（剩余次数提醒），点击'好'关闭。原文片段: {body[:50]}", flush=True)
+            for btn_sel in [".chat-block-dialog button:has-text('好')",
+                            ".chat-block-dialog .btn:has-text('好')",
+                            ".chat-block-dialog a:has-text('好')",
+                            "button:has-text('好')", "button:has-text('我知道了')",
+                            "button:has-text('知道了')", "button:has-text('确定')",
+                            "[class*='dialog'] [class*='btn']:has-text('好')",
+                            "a:has-text('好')", ".btn:has-text('好')"]:
+                try:
+                    b = await self.page.query_selector(btn_sel)
+                    if b and await b.is_visible():
+                        await b.click()
+                        human_delay(0.6, 1.2)
+                        return "dismissed"
+                except Exception:
+                    continue
+            # 兜底 Escape
+            try:
+                await self.page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return "dismissed"
+        except Exception as e:
+            print(f"  [WARN] 处理温馨提示弹窗出错: {e}", flush=True)
+            return ""
+
     async def apply_to_job(self, job: dict, city: str) -> str:
         """
         对单个职位投递（Boss直聘聊天式）。返回状态码用于统计：
@@ -1079,9 +1142,19 @@ class BossZhipinAutomator:
                 return "fail"
             human_delay(APPLY_DELAY_MIN, APPLY_DELAY_MAX)  # 投递动作保持稳健延迟
 
+            # 处理每日沟通次数限制"温馨提示"弹窗（可能挡住后续操作）
+            limit = await self._handle_limit_popup()
+            if limit == "exhausted":
+                # 当日次数用完：本职位未成功投递，标志已置位，调用方循环会停止
+                return "limit_exhausted"
+
             # 关闭"已向BOSS发送消息"弹窗（点X），避免遮罩挡住下一个职位的点击
             await screenshot_page(self.page, "greet_dialog.png")
             await self._close_greet_dialog()
+            # 关闭后可能再弹温馨提示，再处理一次
+            limit = await self._handle_limit_popup()
+            if limit == "exhausted":
+                return "limit_exhausted"
 
             # 记录投递（打招呼语已发送 = 完成投递）
             print(f"  ✅ [投递成功] {company} | {title}")
@@ -1147,6 +1220,9 @@ class BossZhipinAutomator:
                 skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
                 print(f"     ▸ [{city}] 进度：检查 {stat['checked']} | "
                       f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")
+                if self.stop_requested:
+                    print("  🛑 当日沟通次数已用完，停止本城市处理。", flush=True)
+                    return stat
                 human_delay(DELAY_MIN, DELAY_MAX)
 
             page_num += 1
@@ -1204,6 +1280,10 @@ class BossZhipinAutomator:
                     st = await self.process_city(city)
                     if st:
                         city_stats.append(st)
+
+                    if self.stop_requested:
+                        print("\n🛑 当日沟通次数已用完，停止所有城市处理，明天再跑。", flush=True)
+                        break
 
                     # 城市间休息（防止触发反爬）
                     rest_time = random.uniform(5.0, 10.0)

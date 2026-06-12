@@ -339,6 +339,9 @@ class PositionTabsAutomator(BossZhipinAutomator):
             skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
             print(f"     [tab {tab_name}] 检查 {stat['checked']} | "
                   f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")
+            if self.stop_requested:
+                print("  🛑 当日沟通次数已用完，停止脚本，明天再跑。", flush=True)
+                break
             human_delay(DELAY_MIN, DELAY_MAX)
 
         # tab 阶段总结
@@ -381,6 +384,9 @@ class PositionTabsAutomator(BossZhipinAutomator):
                 for tab_name in TABS_TO_PROCESS:
                     st = await self.process_tab(tab_name)
                     all_stats.append(st)
+                    if self.stop_requested:
+                        print("\n🛑 当日沟通次数已用完，停止处理剩余 tab，明天再跑。", flush=True)
+                        break
                     # tab 间休息
                     import random
                     rest = random.uniform(3.0, 6.0)

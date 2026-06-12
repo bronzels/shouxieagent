@@ -301,6 +301,7 @@ class LlmSzAutomator(BossZhipinAutomator):
                         break
 
                     print(f"  本页 {len(jobs)} 个职位，逐个检查...")
+                    stop = False
                     for job in jobs:
                         status = await self.apply_to_job(job, self.city)
                         stat["checked"] += 1
@@ -309,8 +310,14 @@ class LlmSzAutomator(BossZhipinAutomator):
                         skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
                         print(f"     [进度] 检查 {stat['checked']} | "
                               f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")
+                        if self.stop_requested:
+                            print("  🛑 当日沟通次数已用完，停止脚本，明天再跑。", flush=True)
+                            stop = True
+                            break
                         human_delay(DELAY_MIN, DELAY_MAX)
 
+                    if stop:
+                        break
                     page_num += 1
 
                 # dry-run 不标记城市完成（未真正投递）
