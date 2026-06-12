@@ -40,6 +40,19 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 UITARS_MODEL = "bytedance/ui-tars-1.5-7b"
+
+# ─── UI-TARS 提供方式（由命令行参数在 main 中赋值，见文件末尾 argparse）──────────
+# UI-TARS 模型有 3 种提供方式，仅影响 call_uitars 的调用路径，
+# 不影响验证职位的 VERIFY_MODELS_*（那两类始终走 OpenRouter）。
+#   - "openrouter"（默认）：UI-TARS 走 OpenRouter，复用 OpenRouter key 与 _post_openrouter
+#   - "remote"：UI-TARS 走 Kaggle/Colab 等部署的 OpenAI 兼容 endpoint，
+#               key 放在 header 的 x-api-key 字段（不是 Authorization Bearer）
+#   - "local"：本地推理（用户搭建中，暂未实现），调用时抛 NotImplementedError 优雅跳过
+UITARS_PROVIDER = "openrouter"   # openrouter / remote / local
+UITARS_ENDPOINT = ""             # remote 方式的完整 URL（如 https://xxx.ngrok.io/v1/chat/completions）
+UITARS_KEY = ""                  # remote 方式的鉴权 key（放 x-api-key header）
+# local 方式将来本地推理服务地址（OpenAI 兼容），当前未实现，仅占位
+UITARS_LOCAL_URL = "http://127.0.0.1:8000/v1/chat/completions"
 # 验证职位用纯文本免费模型 fallback 链：免费模型 provider 容量经常被打满返回 429，
 # 依次尝试，哪个不限流用哪个（实时核验均为 :free）。Qwen 中文最强但最易限流，放第一位，
 # 后面用同样响应过的 gpt-oss / gemma / llama 兜底。
@@ -217,9 +230,33 @@ async def _post_openrouter(payload: dict, models: list = None, max_rounds: int =
     raise RuntimeError(f"OpenRouter 所有模型多轮重试仍失败: {last_err}")
 
 
+async def _post_uitars_remote(payload: dict) -> dict:
+    """
+    调用 remote 方式（Kaggle/Colab 等部署的 OpenAI 兼容 endpoint）的 UI-TARS。
+    - URL：UITARS_ENDPOINT（命令行 --uitars-endpoint 传入）
+    - 鉴权：key 放在 header 的 x-api-key 字段（不是 Authorization Bearer），
+      等价于 requests.post(url, headers={"x-api-key": key}, json=data)
+    - body 仍为 OpenAI 兼容 chat/completions 格式（vLLM/类似框架默认暴露此接口）
+    """
+    headers = {"Content-Type": "application/json"}
+    if UITARS_KEY:
+        headers["x-api-key"] = UITARS_KEY
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        resp = await client.post(UITARS_ENDPOINT, headers=headers, json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def call_uitars(image_path: str, task_prompt: str) -> str:
     """
-    调用 OpenRouter UI-TARS 模型（仅在选择器兜底时使用），返回含 Thought/Action 的响应。
+    调用 UI-TARS 模型（仅在选择器兜底时使用），返回含 Thought/Action 的响应。
+    根据 UITARS_PROVIDER 分三种提供方式：
+      - openrouter：复用 _post_openrouter，走 OpenRouter（OpenRouter key）
+      - remote    ：走 _post_uitars_remote，POST 到 UITARS_ENDPOINT，x-api-key 鉴权
+      - local     ：本地推理（用户搭建中），暂未实现 → 抛 NotImplementedError，
+                    上层 _click_smart 已 try/except 包裹，会优雅跳过 UI-TARS 兜底不崩溃
+    三种方式的 messages/payload 结构一致（OpenAI 兼容），响应均按
+    result["choices"][0]["message"]["content"] 解析。
     """
     from ui_tars.prompt import COMPUTER_USE_DOUBAO
 
@@ -236,7 +273,16 @@ async def call_uitars(image_path: str, task_prompt: str) -> str:
         }],
         "max_tokens": 512,
     }
-    result = await _post_openrouter(payload)
+
+    if UITARS_PROVIDER == "remote":
+        result = await _post_uitars_remote(payload)
+    elif UITARS_PROVIDER == "local":
+        # 本地 UI-TARS 推理方式尚未实现，待用户搭建完成后补充 endpoint（UITARS_LOCAL_URL）
+        raise NotImplementedError(
+            f"本地 UI-TARS 推理方式尚未实现，待用户搭建完成后补充 endpoint（预留地址: {UITARS_LOCAL_URL}）"
+        )
+    else:  # openrouter（默认）
+        result = await _post_openrouter(payload)
     return result["choices"][0]["message"]["content"]
 
 
@@ -1006,5 +1052,100 @@ class BossZhipinAutomator:
 
 # ─── 入口 ─────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+def _build_arg_parser():
+    """
+    构建命令行参数解析器。
+
+    OpenRouter key 优先级：命令行 --openrouter-key > 环境变量 OPENROUTER_API_KEY（含 .env）。
+    该 key 用于：验证职位的多模态/文本模型（始终走 OpenRouter），
+    以及 UI-TARS 选择 openrouter 提供方式时。
+
+    UI-TARS 提供方式（--uitars-provider）三选一：
+
+      openrouter（默认）：UI-TARS 走 OpenRouter
+        python zhipin_apply.py --openrouter-key sk-or-v1-xxx
+        # 或不传 key，用 .env / 环境变量里的 OPENROUTER_API_KEY
+
+      remote：UI-TARS 走 Kaggle/Colab 部署的 OpenAI 兼容 endpoint（x-api-key 鉴权）
+        python zhipin_apply.py \\
+            --openrouter-key sk-or-v1-xxx \\
+            --uitars-provider remote \\
+            --uitars-endpoint https://xxxx.ngrok.io/v1/chat/completions \\
+            --uitars-key super-secret-key
+        # 验证职位仍用 OpenRouter key；UI-TARS 走 remote endpoint
+
+      local：本地推理（用户搭建中，暂未实现，调用 UI-TARS 时会优雅跳过）
+        python zhipin_apply.py \\
+            --openrouter-key sk-or-v1-xxx \\
+            --uitars-provider local \\
+            --uitars-local-url http://127.0.0.1:8000/v1/chat/completions
+    """
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Boss直聘自动投递脚本（支持 UI-TARS 三种提供方式）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--openrouter-key", default=None,
+        help="OpenRouter API key（优先级高于环境变量 OPENROUTER_API_KEY / .env）。"
+             "用于验证职位的文本/多模态模型，以及 openrouter 方式下的 UI-TARS。",
+    )
+    parser.add_argument(
+        "--uitars-provider", choices=["openrouter", "remote", "local"], default="openrouter",
+        help="UI-TARS 模型提供方式：openrouter（默认，走 OpenRouter）/ "
+             "remote（Kaggle/Colab 部署的 OpenAI 兼容 endpoint，x-api-key 鉴权）/ "
+             "local（本地推理，暂未实现）。",
+    )
+    parser.add_argument(
+        "--uitars-endpoint", default=None,
+        help="remote 方式下 UI-TARS 的完整 URL（如 https://xxxx.ngrok.io/v1/chat/completions）。"
+             "选 remote 时必填。",
+    )
+    parser.add_argument(
+        "--uitars-key", default=None,
+        help="remote 方式下 UI-TARS endpoint 的鉴权 key（放在 header 的 x-api-key 字段）。",
+    )
+    parser.add_argument(
+        "--uitars-local-url", default=UITARS_LOCAL_URL,
+        help=f"local 方式下本地 UI-TARS 推理服务地址（OpenAI 兼容），当前未实现，仅占位预留。"
+             f"默认 {UITARS_LOCAL_URL}。",
+    )
+    return parser
+
+
+def main():
+    """解析命令行参数，赋值到模块级全局变量后启动自动投递。"""
+    global OPENROUTER_API_KEY, UITARS_PROVIDER, UITARS_ENDPOINT, UITARS_KEY, UITARS_LOCAL_URL
+
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    # OpenRouter key：命令行 > 环境变量/.env（保留现有回退方式）
+    if args.openrouter_key:
+        OPENROUTER_API_KEY = args.openrouter_key
+
+    # UI-TARS 提供方式
+    UITARS_PROVIDER = args.uitars_provider
+    UITARS_LOCAL_URL = args.uitars_local_url
+    if args.uitars_key:
+        UITARS_KEY = args.uitars_key
+    if args.uitars_endpoint:
+        UITARS_ENDPOINT = args.uitars_endpoint
+
+    # remote 方式必须提供 endpoint
+    if UITARS_PROVIDER == "remote" and not UITARS_ENDPOINT:
+        parser.error("--uitars-provider remote 需要同时指定 --uitars-endpoint")
+
+    # local 方式提示尚未实现
+    if UITARS_PROVIDER == "local":
+        print("⚠️ 本地 UI-TARS 推理方式尚未实现，待用户搭建完成后补充 endpoint。"
+              f"（预留地址: {UITARS_LOCAL_URL}）UI-TARS 视觉兜底将被优雅跳过。", flush=True)
+
+    print(f"⚙️ UI-TARS 提供方式: {UITARS_PROVIDER}"
+          + (f" | endpoint: {UITARS_ENDPOINT}" if UITARS_PROVIDER == "remote" else ""), flush=True)
+
     asyncio.run(BossZhipinAutomator().run())
+
+
+if __name__ == "__main__":
+    main()
