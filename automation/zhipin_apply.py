@@ -40,7 +40,22 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 UITARS_MODEL = "bytedance/ui-tars-1.5-7b"
-VERIFY_MODEL = "google/gemini-2.5-flash"
+# 验证职位用纯文本免费模型 fallback 链：免费模型 provider 容量经常被打满返回 429，
+# 依次尝试，哪个不限流用哪个（实时核验均为 :free）。Qwen 中文最强但最易限流，放第一位，
+# 后面用同样响应过的 gpt-oss / gemma / llama 兜底。
+VERIFY_MODELS_TEXT = [
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "openai/gpt-oss-120b:free",
+    "google/gemma-4-31b-it:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+]
+# 抓不到正文时用免费多模态模型（带截图判断）
+VERIFY_MODELS_MULTIMODAL = [
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+]
+# 正文文本判定为"足够"的最小长度；低于此视为反爬导致抓取失败，触发滚动重抓/多模态兜底
+MIN_DESC_LEN = 40
 
 APPLIED_JOBS_FILE = Path(__file__).parent / "applied_jobs.json"
 SCREENSHOTS_DIR = Path(__file__).parent / "screenshots"
@@ -154,38 +169,52 @@ async def screenshot_page(page: Page, filename: str) -> str:
 
 # ─── OpenRouter API 调用 ──────────────────────────────────────────────────────
 
-async def _post_openrouter(payload: dict, max_retries: int = 4) -> dict:
+async def _post_openrouter(payload: dict, models: list = None, max_rounds: int = 3) -> dict:
     """
-    调用 OpenRouter，带 429/5xx 指数退避重试，缓解限流。
+    调用 OpenRouter，支持免费模型 fallback 链 + 429/5xx 退避重试。
+    - models：要依次尝试的 model id 列表（免费模型 provider 常被打满 429，
+      逐个尝试，哪个不限流用哪个）。不传则用 payload["model"] 单模型。
+    - 单模型 429 立即换下一个模型；整轮所有模型都 429 才退避等待重试整轮。
+    - 尊重 429 响应里的 retry_after_seconds / Retry-After。
     """
-    delay = 5.0
+    model_list = models or [payload.get("model")]
+    delay = 4.0
     last_err = None
-    for attempt in range(max_retries):
-        try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
-                resp = await client.post(
-                    f"{OPENROUTER_BASE_URL}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                if resp.status_code in (429, 500, 502, 503):
-                    last_err = f"{resp.status_code}"
-                    print(f"  ⏳ OpenRouter {resp.status_code} 限流/错误，{delay:.0f}s 后重试 ({attempt+1}/{max_retries})", flush=True)
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 2, 60)
-                    continue
-                resp.raise_for_status()
-                return resp.json()
-        except httpx.HTTPStatusError as e:
-            raise
-        except Exception as e:
-            last_err = str(e)
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 60)
-    raise RuntimeError(f"OpenRouter 多次重试仍失败: {last_err}")
+    for rnd in range(max_rounds):
+        retry_after = 0
+        for m in model_list:
+            payload["model"] = m
+            try:
+                async with httpx.AsyncClient(timeout=90.0) as client:
+                    resp = await client.post(
+                        f"{OPENROUTER_BASE_URL}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json=payload,
+                    )
+                    if resp.status_code in (429, 500, 502, 503):
+                        last_err = f"{m}:{resp.status_code}"
+                        try:
+                            meta = resp.json().get("error", {}).get("metadata", {})
+                            retry_after = max(retry_after, int(float(meta.get("retry_after_seconds", 0))))
+                        except Exception:
+                            pass
+                        continue  # 立即换下一个模型
+                    resp.raise_for_status()
+                    return resp.json()
+            except httpx.HTTPStatusError:
+                raise
+            except Exception as e:
+                last_err = f"{m}:{str(e)[:40]}"
+                continue
+        # 整轮所有模型都失败 → 退避后重试整轮
+        wait = max(delay, retry_after)
+        print(f"  ⏳ 免费模型全部限流({last_err})，{wait:.0f}s 后重试整轮 ({rnd+1}/{max_rounds})", flush=True)
+        await asyncio.sleep(wait)
+        delay = min(delay * 2, 40)
+    raise RuntimeError(f"OpenRouter 所有模型多轮重试仍失败: {last_err}")
 
 
 async def call_uitars(image_path: str, task_prompt: str) -> str:
@@ -213,8 +242,10 @@ async def call_uitars(image_path: str, task_prompt: str) -> str:
 
 async def verify_job_is_it_remote(job_title: str, job_desc: str, image_path: str = None) -> tuple[bool, str]:
     """
-    用 Gemini 判断职位是否为「IT 软件/技术开发类」且「支持远程/WFH」。
-    以职位标题 + 正文描述文本为主依据（截图可选辅助）。
+    判断职位是否为「IT 软件/技术开发类」且「支持远程/WFH」。
+    - 默认用免费纯文本模型 VERIFY_MODEL（以标题+正文为依据，中文足够）。
+    - 若传入 image_path（说明正文抓取失败、需看图），改用免费多模态模型
+      VERIFY_MODEL_MULTIMODAL，把截图一起发出去兜底判断。
     采用严格提示词：只有核心岗位是软件/IT技术开发，且支持远程，才判定投递。
     返回 (should_apply, reason)
     """
@@ -247,16 +278,18 @@ async def verify_job_is_it_remote(job_title: str, job_desc: str, image_path: str
 理由：（一句话，说明关键原因）"""
 
     content = [{"type": "text", "text": prompt}]
+    models = VERIFY_MODELS_TEXT  # 默认纯文本免费模型 fallback 链
     if image_path:
+        # 正文抓取失败 → 用免费多模态模型 + 截图兜底
+        models = VERIFY_MODELS_MULTIMODAL
         img_b64 = image_to_base64(image_path)
         content.insert(0, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}})
 
     payload = {
-        "model": VERIFY_MODEL,
         "messages": [{"role": "user", "content": content}],
         "max_tokens": 400,
     }
-    result = await _post_openrouter(payload)
+    result = await _post_openrouter(payload, models=models)
     answer = result["choices"][0]["message"]["content"]
 
     # 严格解析：必须出现"结论：投递"，且不能同时出现"不投递"
@@ -777,12 +810,32 @@ class BossZhipinAutomator:
             # 抓取职位描述正文
             desc = await self._extract_job_description()
             safe = re.sub(r"[^\w一-龥]", "_", f"{company}_{title}")[:60]
-            shot_path = await screenshot_page(self.page, f"job_{safe}.png")
 
-            # Gemini 严格判断（标题+正文为主，截图辅助）
-            should_apply, reason = await verify_job_is_it_remote(title, desc, shot_path)
+            # 正文太短（疑似反爬/懒加载）→ 滚动详情面板再抓一次
+            if len(desc) < MIN_DESC_LEN:
+                try:
+                    await self.page.mouse.wheel(0, 600)
+                    human_delay(1.0, 2.0)
+                    await self.page.mouse.wheel(0, -300)
+                    human_delay(0.8, 1.5)
+                except Exception:
+                    pass
+                desc2 = await self._extract_job_description()
+                if len(desc2) > len(desc):
+                    desc = desc2
+
+            # 判断：正文够长 → 纯文本免费模型；正文仍抓不到 → 截图+免费多模态兜底
+            if len(desc) >= MIN_DESC_LEN:
+                should_apply, reason = await verify_job_is_it_remote(title, desc)
+                model_used = "纯文本"
+            else:
+                shot_path = await screenshot_page(self.page, f"job_{safe}.png")
+                print(f"  ⚠️ 正文抓取不足({len(desc)}字)，降级用免费多模态+截图判断")
+                should_apply, reason = await verify_job_is_it_remote(title, desc, shot_path)
+                model_used = "多模态"
+
             verdict = "✅ 投递" if should_apply else "❌ 不投递"
-            print(f"  🤖 判断[{verdict}]: {reason[:160].replace(chr(10), ' ')}")
+            print(f"  🤖 判断[{verdict}]({model_used}): {reason[:160].replace(chr(10), ' ')}")
 
             if not should_apply:
                 return False
