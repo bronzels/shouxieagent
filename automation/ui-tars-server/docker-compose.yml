@@ -10,6 +10,15 @@ services:
       - "8000:8000"
     volumes:
       - /mnt/ext4disk/ui-tars/models:/models:ro
+    command: >
+      python3 -m llama_cpp.server
+      --model /models/UI-TARS-1.5-7B-q4_k_m.gguf
+      --clip_model_path /models/UI-TARS-1.5-7B-q8_0.mmproj
+      --chat_format qwen2.5-vl
+      --host 0.0.0.0
+      --port 8000
+      --n_gpu_layers -1
+      --n_ctx 8192
     environment:
       - MODEL_PATH=/models/UI-TARS-1.5-7B-q4_k_m.gguf
       - MMPROJ_PATH=/models/UI-TARS-1.5-7B-q8_0.mmproj

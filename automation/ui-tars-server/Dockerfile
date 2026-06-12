@@ -54,6 +54,7 @@ EXPOSE 8000
 CMD python3 -m llama_cpp.server \
     --model "${MODEL_PATH}" \
     --clip_model_path "${MMPROJ_PATH}" \
+    --chat_format "qwen2.5-vl" \
     --host "${HOST}" \
     --port "${PORT}" \
     --n_gpu_layers -1 \

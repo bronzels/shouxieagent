@@ -7,3 +7,10 @@ automation/chrome_profile/
 automation/UI-TARS/
 automation/UI-TARS-desktop/
 *.whl
+automation/screenshots/
+automation/videos/
+**/*.mp4
+**/*.webm
+**/*.png
+**/*.jpg
+**/*.jpeg

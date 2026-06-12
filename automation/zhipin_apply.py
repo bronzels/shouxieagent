@@ -524,7 +524,7 @@ async def human_mouse_move_and_click(page: Page, x: int, y: int):
 # ─── 主要自动化逻辑 ───────────────────────────────────────────────────────────
 
 class BossZhipinAutomator:
-    def __init__(self, verify_fn=None):
+    def __init__(self, verify_fn=None, dry_run=False):
         """
         verify_fn: 职位判断函数，签名为 async (title, desc, salary="") -> (bool, str)
                    默认为 None，此时 apply_to_job 使用模块级 verify_job_is_it_remote。
@@ -532,8 +532,11 @@ class BossZhipinAutomator:
                      - 远程岗任务（verify_job_is_it_remote）
                      - 大模型深圳任务（verify_damoxing_sz）
                      - 职位 tab 混合任务（verify_mixed）
+        dry_run:   调试模式。为 True 时，apply_to_job 完成检查+判断+打印结论，但
+                   【不点立即沟通、不发招呼、不记录投递】，用于安全验证筛选逻辑。
         """
         self.verify_fn = verify_fn  # 可注入的职位判断函数
+        self.dry_run = dry_run
         self.applied_data = load_applied_jobs()
         self.status_data = zhipin_status.load_status()  # 对方回应状态（apply前过滤）
         self.page: Page = None
@@ -966,6 +969,11 @@ class BossZhipinAutomator:
 
             if not should_apply:
                 return "reject"
+
+            # dry-run 调试模式：判断通过即停，不点立即沟通/不发招呼/不记录
+            if self.dry_run:
+                print(f"  🧪 [dry-run] 本应投递（未实际发招呼/未记录）: {company} | {title}")
+                return "would_apply"
 
             # 检查按钮：若"继续沟通"说明之前已发过消息 → 记录并跳过，不重复发
             chat_btn = await self.page.query_selector(

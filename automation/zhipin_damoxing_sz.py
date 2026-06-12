@@ -207,8 +207,8 @@ class DamoxingSzAutomator(BossZhipinAutomator):
     仅覆盖：列表页 URL 生成（固定深圳+大模型关键字）、run() 主流程。
     """
 
-    def __init__(self):
-        super().__init__(verify_fn=verify_damoxing_sz)
+    def __init__(self, dry_run=False):
+        super().__init__(verify_fn=verify_damoxing_sz, dry_run=dry_run)
         self.search_keyword = DAMOXING_SEARCH_KEYWORD
         self.city = DAMOXING_CITY
         self.city_code = DAMOXING_CITY_CODE
@@ -275,7 +275,8 @@ class DamoxingSzAutomator(BossZhipinAutomator):
                     return
 
                 stat = {"checked": 0, "applied": 0, "reject": 0,
-                        "dup": 0, "contacted": 0, "fail": 0, "blocked": 0}
+                        "dup": 0, "contacted": 0, "fail": 0, "blocked": 0,
+                        "would_apply": 0}
 
                 page_num = 1
                 any_page_ok = False
@@ -309,15 +310,17 @@ class DamoxingSzAutomator(BossZhipinAutomator):
 
                     page_num += 1
 
-                if any_page_ok:
+                # dry-run 不标记城市完成（未真正投递）
+                if any_page_ok and not self.dry_run:
                     mark_city_completed(self.applied_data, f"{self.city}-大模型")
 
                 # 总结
                 skipped_total = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
-                print(f"\n  大模型·深圳 总结：")
+                would = stat.get('would_apply', 0)
+                print(f"\n  大模型·深圳 总结{'（dry-run 试运行）' if self.dry_run else ''}：")
                 print(f"  共检查 {stat['checked']} 个职位 → "
-                      f"投递 {stat['applied']} | "
-                      f"跳过 {skipped_total}（不符合{stat['reject']}/已投{stat['dup']}"
+                      + (f"本应投递 {would} | " if self.dry_run else f"投递 {stat['applied']} | ")
+                      + f"跳过 {skipped_total}（不符合{stat['reject']}/已投{stat['dup']}"
                       f"/已沟通{stat['contacted']}/对方已回应{stat['blocked']}）| "
                       f"失败 {stat['fail']}")
 
@@ -326,12 +329,15 @@ class DamoxingSzAutomator(BossZhipinAutomator):
                 save_applied_jobs(self.applied_data)
 
             finally:
-                try:
-                    save_applied_jobs(self.applied_data)
-                    csv_path = export_applications_csv(self.applied_data)
-                    print(f"最终统计CSV已生成: {csv_path}")
-                except Exception as e:
-                    print(f"[WARN] 导出CSV失败: {e}")
+                if not self.dry_run:
+                    try:
+                        save_applied_jobs(self.applied_data)
+                        csv_path = export_applications_csv(self.applied_data)
+                        print(f"最终统计CSV已生成: {csv_path}")
+                    except Exception as e:
+                        print(f"[WARN] 导出CSV失败: {e}")
+                else:
+                    print("（dry-run：未记录、未导出 CSV）")
                 print("\n关闭浏览器...")
                 try:
                     await self.context.close()
@@ -369,6 +375,8 @@ def _build_arg_parser():
                         help="remote 方式下 UI-TARS endpoint URL")
     parser.add_argument("--uitars-key", default=None,
                         help="remote 方式下 UI-TARS x-api-key 鉴权 key")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="试运行：搜索+判断+打印结论，但不点立即沟通/不发招呼/不记录，用于安全验证筛选。")
     return parser
 
 
@@ -392,7 +400,9 @@ def main():
           + (f" | endpoint: {za.UITARS_ENDPOINT}" if za.UITARS_PROVIDER == "remote" else ""),
           flush=True)
 
-    asyncio.run(DamoxingSzAutomator().run())
+    if args.dry_run:
+        print("🧪 dry-run 试运行：只搜索+判断，不实际投递", flush=True)
+    asyncio.run(DamoxingSzAutomator(dry_run=args.dry_run).run())
 
 
 if __name__ == "__main__":
