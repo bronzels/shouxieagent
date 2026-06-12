@@ -104,10 +104,14 @@ CITY_CODES = {
 DEFAULT_HOT_CITIES = list(CITY_CODES.keys())
 
 # 人类操作延迟范围（秒）
-DELAY_MIN = 1.5
-DELAY_MAX = 3.5
-APPLY_DELAY_MIN = 3.0
-APPLY_DELAY_MAX = 6.0
+# 策略：检查/跳过的职位走快速延迟（读取动作为主，对 zhipin 真实请求少，风险低）；
+#       真正投递（立即沟通发招呼）走稳健延迟（发真实消息，且有每日打招呼上限，需谨慎）。
+DELAY_MIN = 0.8          # 职位间隔（检查阶段，下调）
+DELAY_MAX = 1.8
+CARD_DELAY_MIN = 1.2     # 点职位卡→详情面板（检查阶段，下调）
+CARD_DELAY_MAX = 2.2
+APPLY_DELAY_MIN = 3.0    # 投递动作（立即沟通后）保持稳健
+APPLY_DELAY_MAX = 5.0
 
 # ─── 工具函数 ─────────────────────────────────────────────────────────────────
 
@@ -890,12 +894,12 @@ class BossZhipinAutomator:
         print(f"     薪资: {job.get('salary', 'N/A')} | 地点: {job.get('location','')} | 标签: {', '.join(job.get('tags', []))}")
 
         try:
-            # 点职位卡 → 详情面板
+            # 点职位卡 → 详情面板（检查阶段，快速延迟）
             card = job["element"]
             await card.scroll_into_view_if_needed()
-            human_delay(0.5, 1.2)
+            human_delay(0.4, 0.9)
             await card.click()
-            human_delay(2.0, 3.5)
+            human_delay(CARD_DELAY_MIN, CARD_DELAY_MAX)
 
             # 抓取职位描述正文
             desc = await self._extract_job_description()
@@ -951,7 +955,7 @@ class BossZhipinAutomator:
             if not clicked:
                 print("  ⚠️  [跳过-未找到立即沟通按钮]")
                 return "fail"
-            human_delay(2.5, 4.0)
+            human_delay(APPLY_DELAY_MIN, APPLY_DELAY_MAX)  # 投递动作保持稳健延迟
 
             # 关闭"已向BOSS发送消息"弹窗（点X），避免遮罩挡住下一个职位的点击
             await screenshot_page(self.page, "greet_dialog.png")
