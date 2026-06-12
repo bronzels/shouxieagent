@@ -1,6 +1,8 @@
 services:
   ui-tars:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: ui-tars:latest
     container_name: ui-tars
     restart: unless-stopped
@@ -9,7 +11,8 @@ services:
     volumes:
       - /mnt/ext4disk/ui-tars/models:/models:ro
     environment:
-      - MODEL_PATH=/models/UI-TARS-1.5-7B.Q4_K_M.gguf
+      - MODEL_PATH=/models/UI-TARS-1.5-7B-q4_k_m.gguf
+      - MMPROJ_PATH=/models/UI-TARS-1.5-7B-q8_0.mmproj
       - N_CTX=8192
     deploy:
       resources:
