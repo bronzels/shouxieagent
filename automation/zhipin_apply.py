@@ -73,6 +73,9 @@ MIN_DESC_LEN = 40
 APPLIED_JOBS_FILE = Path(__file__).parent / "applied_jobs.json"
 SCREENSHOTS_DIR = Path(__file__).parent / "screenshots"
 SCREENSHOTS_DIR.mkdir(exist_ok=True)
+# 最终统计 CSV 单独目录
+REPORTS_DIR = Path(__file__).parent / "reports"
+REPORTS_DIR.mkdir(exist_ok=True)
 
 # 搜索关键词（"远程 软件" 用空格分隔，更聚焦 IT 软件类远程岗）
 SEARCH_KEYWORD = "远程 软件"
@@ -159,6 +162,33 @@ def mark_city_completed(data: dict, city: str):
         data["completed_cities"].append(city)
         save_applied_jobs(data)
         print(f"  🏁 城市 [{city}] 处理完成，已记录（下次运行将跳过）")
+
+
+def export_applications_csv(data: dict) -> str:
+    """
+    把投递记录导出为 CSV，放到单独的 reports/ 目录。
+    文件名包含【投递时间】+【搜索内容】，例如：
+      投递记录_远程软件_20260612_143000.csv
+    用 utf-8-sig（带 BOM），Excel 打开中文不乱码。
+    返回 CSV 文件路径。
+    """
+    import csv
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    kw = re.sub(r"\s+", "", SEARCH_KEYWORD)  # "远程 软件" -> "远程软件"
+    fname = f"投递记录_{kw}_{ts}.csv"
+    path = REPORTS_DIR / fname
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        # 表头：搜索内容 + 生成时间 作为元信息行，再写列名
+        w.writerow([f"搜索内容：{SEARCH_KEYWORD}",
+                    f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    f"投递总数：{len(data.get('jobs', []))}",
+                    f"完成城市：{'/'.join(data.get('completed_cities', []))}"])
+        w.writerow(["序号", "公司", "职位", "城市", "投递时间"])
+        for i, j in enumerate(data.get("jobs", []), 1):
+            w.writerow([i, j.get("company", ""), j.get("position", ""),
+                        j.get("city", ""), j.get("applied_at", "")])
+    return str(path)
 
 
 def human_delay(min_s: float = DELAY_MIN, max_s: float = DELAY_MAX):
@@ -1033,6 +1063,9 @@ class BossZhipinAutomator:
                 print(f"📊 累计投递 {len(self.applied_data['jobs'])} 个职位")
                 print(f"🏙️ 已完成城市: {', '.join(self.applied_data.get('completed_cities', [])) or '无'}")
                 print(f"📁 记录已保存至: {APPLIED_JOBS_FILE}")
+                # 导出最终统计 CSV（文件名含投递时间+搜索内容，放 reports/ 目录）
+                csv_path = export_applications_csv(self.applied_data)
+                print(f"📑 最终统计CSV: {csv_path}")
                 print("="*60)
 
                 # 显示投递记录
