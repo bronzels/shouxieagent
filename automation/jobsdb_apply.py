@@ -1195,16 +1195,13 @@ class JobsDBAutomator:
         desc = await self.get_job_description(job)
         safe = self._safe_name(job)
 
-        # 若正文仍不足，用截图兜底
-        use_image = len(desc) < MIN_DESC_LEN
-        shot_path = None
-        if use_image:
-            print(f"  ⚠️ 正文抓取不足({len(desc)}字)，降级用多模态+截图判断", flush=True)
-            shot_path = await screenshot_page(self.page, f"job_{safe}.png")
+        # 正文不足时仅打印警告，仍用文本判断（不截图 OCR——运行时禁用多模态读文字）。
+        if len(desc) < MIN_DESC_LEN:
+            print(f"  ⚠️ 正文抓取不足({len(desc)}字)，仍按文本(标题+少量正文)判断，不截图OCR", flush=True)
 
-        # LLM 验证
+        # LLM 验证（纯文本，绝不传截图）
         try:
-            should_apply, reason = await verify_jobsdb(title, desc, shot_path)
+            should_apply, reason = await verify_jobsdb(title, desc, None)
         except Exception as e:
             print(f"  [ERROR] LLM 验证失败: {e}", flush=True)
             stat["fail"] += 1
