@@ -1,18 +1,17 @@
 """
-UI-TARS vLLM 服务启动脚本
+UI-TARS 推理服务启动脚本
 
-自动检测运行环境和 GPU 配置：
+后端选择策略：
+  单卡（任意显存，含本地 3060/T4/P100） → llama-cpp-python server + GGUF Q4_K_M (~4.7GB)
+  双卡 32GB+（Kaggle T4 x2）           → vLLM tp=2 BF16 (~15GB)
+  无 GPU                               → llama-cpp-python CPU 模式（慢）
 
-Kaggle:
-  - 单卡(16GB): 读 /kaggle/input/，要求模型已挂载，使用 fp8 KV cache
-  - 双卡(32GB): 读 /kaggle/input/，要求模型已挂载，tp=2 BF16
-  - 未满足条件则打印提示并退出
+两种后端均提供 OpenAI 兼容 API（http://host:port/v1），inference_client.py 无需修改。
 
-Colab:
-  - 自动从 HuggingFace 下载模型到 /content/models/
-
-其他环境（本地等）:
-  - 从项目根目录 /models/ 加载，使用 fp8 KV cache
+环境自动检测：
+  Kaggle → 从 /kaggle/input/ 读取已挂载模型（未挂载则打印操作步骤退出）
+  Colab  → 自动从 HuggingFace 下载模型到 /content/models/
+  本地   → 从项目根目录 models/ 加载（未下载则打印下载命令退出）
 """
 
 import subprocess
@@ -20,39 +19,38 @@ import sys
 import os
 import glob
 
-MODEL_ID = "ByteDance-Seed/UI-TARS-1.5-7B"
-MODEL_DIR_NAME = "UI-TARS-1.5-7B"
+# ── 模型常量 ──────────────────────────────────────────────────────────────────
 
-# Kaggle 挂载后模型目录名可能带连字符或下划线，用 glob 匹配
-KAGGLE_INPUT_ROOT = "/kaggle/input"
-KAGGLE_MODEL_GLOB = os.path.join(KAGGLE_INPUT_ROOT, "*ui-tars*", MODEL_DIR_NAME)
+# 双卡 BF16 模型（官方，~15GB）
+BF16_MODEL_ID   = "ByteDance-Seed/UI-TARS-1.5-7B"
+BF16_DIR_NAME   = "UI-TARS-1.5-7B"
 
-COLAB_MODEL_DIR = f"/content/models/{MODEL_DIR_NAME}"
+# 单卡 GGUF Q4_K_M（社区，~4.7GB）
+GGUF_REPO_ID    = "Mungert/UI-TARS-1.5-7B-GGUF"
+GGUF_FILENAME   = "UI-TARS-1.5-7B.Q4_K_M.gguf"
+GGUF_DIR_NAME   = "UI-TARS-1.5-7B-GGUF"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOCAL_MODEL_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "..", "models", MODEL_DIR_NAME))
+LOCAL_MODELS_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "..", "models"))
 
 
-# ── 环境检测 ────────────────────────────────────────────────────────────────
+# ── 环境检测 ──────────────────────────────────────────────────────────────────
 
 def detect_env():
     """返回 'kaggle' | 'colab' | 'local'"""
     if os.path.isdir("/kaggle/working"):
         return "kaggle"
-    if os.path.isdir("/content") and "COLAB_GPU" in os.environ or _is_colab():
+    try:
+        import google.colab  # noqa: F401
+        return "colab"
+    except ImportError:
+        pass
+    if os.path.isdir("/content") and "COLAB_GPU" in os.environ:
         return "colab"
     return "local"
 
 
-def _is_colab():
-    try:
-        import google.colab  # noqa: F401
-        return True
-    except ImportError:
-        return False
-
-
-# ── GPU 检测 ────────────────────────────────────────────────────────────────
+# ── GPU 检测 ──────────────────────────────────────────────────────────────────
 
 def detect_gpus():
     """返回 (gpu_count, vram_per_gpu_gb, gpu_name_list)"""
@@ -61,8 +59,7 @@ def detect_gpus():
         count = torch.cuda.device_count()
         if count > 0:
             names = [torch.cuda.get_device_name(i) for i in range(count)]
-            # 从 torch 获取显存（字节转 GB）
-            vram = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            vram  = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
             return count, int(vram), names
     except ImportError:
         pass
@@ -78,9 +75,7 @@ def detect_gpus():
             for row in rows:
                 parts = row.split(",")
                 names.append(parts[0].strip())
-                # memory.total 格式如 "16160 MiB"
-                vram_mib = int(parts[1].strip().split()[0])
-                vrams.append(vram_mib // 1024)
+                vrams.append(int(parts[1].strip().split()[0]) // 1024)
             return len(names), vrams[0] if vrams else 0, names
     except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
         pass
@@ -88,149 +83,209 @@ def detect_gpus():
     return 0, 0, []
 
 
-# ── 模型路径解析 ─────────────────────────────────────────────────────────────
+# ── 后端决策 ──────────────────────────────────────────────────────────────────
 
-def find_kaggle_model_dir():
-    """在 /kaggle/input 下 glob 匹配模型目录，返回路径或 None"""
-    # 精确子目录名
-    candidates = glob.glob(os.path.join(KAGGLE_INPUT_ROOT, "*", MODEL_DIR_NAME))
-    if candidates:
-        return candidates[0]
-    # 宽松匹配：目录名含 ui-tars
-    for entry in os.listdir(KAGGLE_INPUT_ROOT):
-        if "ui-tars" in entry.lower() or "uitars" in entry.lower():
-            full = os.path.join(KAGGLE_INPUT_ROOT, entry)
-            if os.path.isdir(full) and os.path.isfile(os.path.join(full, "config.json")):
-                return full
+def decide_backend(gpu_count, vram_gb, gpu_names):
+    """
+    返回 'llamacpp'（单卡/无卡）或 'vllm'（双卡）
+    """
+    print(f"[GPU] {gpu_count} 张  每卡约 {vram_gb}GB  {gpu_names}")
+    if gpu_count >= 2:
+        print("[后端] 双卡 → vLLM tp=2 BF16")
+        return "vllm"
+    print(f"[后端] {'单卡' if gpu_count == 1 else '无 GPU'} → llama.cpp GGUF Q4_K_M")
+    return "llamacpp"
+
+
+# ── 模型路径解析 ──────────────────────────────────────────────────────────────
+
+def resolve_model_path(env, backend):
+    """
+    根据环境和后端返回模型路径，不满足条件则打印提示退出。
+    llamacpp → gguf 文件路径
+    vllm     → 模型目录路径
+    """
+    if backend == "llamacpp":
+        dir_name, file_name = GGUF_DIR_NAME, GGUF_FILENAME
+        dl_func = _download_gguf
+    else:
+        dir_name, file_name = BF16_DIR_NAME, None
+        dl_func = _download_bf16
+
+    if env == "kaggle":
+        return _kaggle_model_path(dir_name, file_name, dl_func, backend)
+    elif env == "colab":
+        return _colab_model_path(dir_name, file_name, dl_func, backend)
+    else:
+        return _local_model_path(dir_name, file_name, dl_func, backend)
+
+
+def _kaggle_model_path(dir_name, file_name, dl_func, backend):
+    """Kaggle 只读 /kaggle/input，不下载（带宽受限）"""
+    path = _find_in_kaggle_input(dir_name, file_name)
+    if not path:
+        _abort_kaggle_missing(dir_name, backend)
+    print(f"[模型] Kaggle 挂载: {path}")
+    return path
+
+
+def _colab_model_path(dir_name, file_name, dl_func, backend):
+    target_dir = f"/content/models/{dir_name}"
+    full_path   = os.path.join(target_dir, file_name) if file_name else target_dir
+    if not _model_ready(full_path, file_name):
+        dl_func(target_dir)
+    print(f"[模型] Colab 本地: {full_path}")
+    return full_path
+
+
+def _local_model_path(dir_name, file_name, dl_func, backend):
+    target_dir = os.path.join(LOCAL_MODELS_ROOT, dir_name)
+    full_path   = os.path.join(target_dir, file_name) if file_name else target_dir
+    if not _model_ready(full_path, file_name):
+        print(f"\n[错误] 本地模型不存在: {full_path}")
+        if backend == "llamacpp":
+            print("请运行以下命令下载 GGUF 模型（约 4.7GB）：")
+            print(f"  huggingface-cli download {GGUF_REPO_ID} {GGUF_FILENAME} --local-dir {target_dir}")
+        else:
+            print("请运行以下命令下载模型（约 15GB）：")
+            print(f"  huggingface-cli download {BF16_MODEL_ID} --local-dir {target_dir}")
+        sys.exit(1)
+    print(f"[模型] 本地: {full_path}")
+    return full_path
+
+
+def _model_ready(path, file_name):
+    if file_name:
+        return os.path.isfile(path) and os.path.getsize(path) > 1_000_000
+    return os.path.isdir(path) and os.path.isfile(os.path.join(path, "config.json"))
+
+
+def _find_in_kaggle_input(dir_name, file_name):
+    """在 /kaggle/input 下递归查找模型文件或目录"""
+    # 精确目录名
+    for entry in os.listdir("/kaggle/input"):
+        base = os.path.join("/kaggle/input", entry)
+        # GGUF 文件
+        if file_name:
+            candidate = os.path.join(base, file_name)
+            if os.path.isfile(candidate):
+                return candidate
+            # 直接就是文件
+            if entry == file_name and os.path.isfile(base):
+                return base
+        # BF16 目录
+        else:
+            if os.path.isfile(os.path.join(base, "config.json")):
+                return base
+            sub = os.path.join(base, dir_name)
+            if os.path.isfile(os.path.join(sub, "config.json")):
+                return sub
     return None
 
 
-def model_ready(path):
-    return path and os.path.isfile(os.path.join(path, "config.json"))
+# ── 下载函数 ──────────────────────────────────────────────────────────────────
 
-
-# ── 配置决策 ─────────────────────────────────────────────────────────────────
-
-def resolve_model_and_config(env, gpu_count, vram_gb, gpu_names):
-    """
-    返回 (model_path, vllm_cfg) 或在配置不满足时打印提示并退出。
-
-    vllm_cfg = {
-        "tp": int,
-        "kv_cache_dtype": str | None,
-    }
-    """
-    print(f"\n[环境] {env.upper()}  |  GPU x{gpu_count}  |  每卡约 {vram_gb}GB  |  {gpu_names}")
-
-    # ── Kaggle ──────────────────────────────────────────────────────────────
-    if env == "kaggle":
-        model_dir = find_kaggle_model_dir()
-
-        if not model_ready(model_dir):
-            _abort_kaggle_no_model()
-
-        if gpu_count >= 2:
-            # 双卡：BF16，tp=2，不需要 fp8
-            print(f"[配置] Kaggle 双卡  tp=2  BF16  model={model_dir}")
-            return model_dir, {"tp": 2, "kv_cache_dtype": None}
-
-        # 单卡：必须 fp8
-        if vram_gb < 15:
-            _abort_kaggle_vram(gpu_count, vram_gb, need_fp8=True)
-
-        print(f"[配置] Kaggle 单卡  tp=1  fp8 KV cache  model={model_dir}")
-        return model_dir, {"tp": 1, "kv_cache_dtype": "fp8"}
-
-    # ── Colab ────────────────────────────────────────────────────────────────
-    if env == "colab":
-        if not model_ready(COLAB_MODEL_DIR):
-            _download_model(COLAB_MODEL_DIR)
-
-        if gpu_count == 0:
-            print("警告: Colab 未分配 GPU，将以 CPU 运行（速度极慢）")
-            return COLAB_MODEL_DIR, {"tp": 1, "kv_cache_dtype": None}
-
-        cfg = {"tp": 1, "kv_cache_dtype": "fp8"} if gpu_count == 1 else {"tp": 2, "kv_cache_dtype": None}
-        print(f"[配置] Colab  tp={cfg['tp']}  kv={cfg['kv_cache_dtype'] or 'BF16'}  model={COLAB_MODEL_DIR}")
-        return COLAB_MODEL_DIR, cfg
-
-    # ── 本地 / 其他 ──────────────────────────────────────────────────────────
-    if not model_ready(LOCAL_MODEL_DIR):
-        print(f"\n[错误] 本地模型目录不存在或不完整: {LOCAL_MODEL_DIR}")
-        print("请先下载模型:")
-        print(f"  huggingface-cli download {MODEL_ID} --local-dir {LOCAL_MODEL_DIR}")
-        sys.exit(1)
-
-    cfg = {"tp": 1, "kv_cache_dtype": "fp8"}
-    if gpu_count >= 2:
-        cfg = {"tp": 2, "kv_cache_dtype": None}
-    print(f"[配置] 本地  tp={cfg['tp']}  kv={cfg['kv_cache_dtype'] or 'BF16'}  model={LOCAL_MODEL_DIR}")
-    return LOCAL_MODEL_DIR, cfg
-
-
-# ── 错误提示 ──────────────────────────────────────────────────────────────────
-
-def _abort_kaggle_no_model():
-    print("\n" + "=" * 60)
-    print("[Kaggle 配置错误] 未找到已挂载的 UI-TARS 模型")
-    print()
-    print("请在 Kaggle notebook 右侧面板操作：")
-    print("  1. 点击 '+ Add Input'")
-    print("  2. 选择 'Models'")
-    print(f"  3. 搜索 '{MODEL_ID}'")
-    print("  4. 点击 Add，然后重新运行此脚本")
-    print("=" * 60)
-    sys.exit(1)
-
-
-def _abort_kaggle_vram(gpu_count, vram_gb, need_fp8=False):
-    print("\n" + "=" * 60)
-    if need_fp8:
-        print(f"[Kaggle 配置错误] 单卡显存 {vram_gb}GB 不足以运行 UI-TARS-1.5-7B")
-        print()
-        print("解决方案（选其一）：")
-        print("  A. 在 Notebook Settings 中切换到 T4 x2（双卡，申请后可用）")
-        print("     → 双卡合计 32GB，可 BF16 全精度运行")
-        print("  B. 确认已选 T4 或 P100（单卡 16GB），当前检测到:", vram_gb, "GB")
-        print("     → 如显示 < 15GB 说明 GPU 分配异常，重启 notebook 再试")
-    else:
-        print(f"[Kaggle 配置错误] 双卡总显存不足，每卡 {vram_gb}GB")
-    print("=" * 60)
-    sys.exit(1)
-
-
-# ── 模型下载 ──────────────────────────────────────────────────────────────────
-
-def _download_model(target_dir):
-    print(f"\n[下载] {MODEL_ID} → {target_dir}  (约 15GB，请耐心等待...)")
+def _download_gguf(target_dir):
+    print(f"\n[下载] GGUF Q4_K_M ({GGUF_FILENAME}, ~4.7GB) → {target_dir}")
     os.makedirs(target_dir, exist_ok=True)
     subprocess.run([
         sys.executable, "-m", "huggingface_hub", "download",
-        MODEL_ID,
+        GGUF_REPO_ID, GGUF_FILENAME,
+        "--local-dir", target_dir,
+    ], check=True)
+    print("[下载] 完成")
+
+
+def _download_bf16(target_dir):
+    print(f"\n[下载] BF16 完整模型 ({BF16_MODEL_ID}, ~15GB) → {target_dir}")
+    os.makedirs(target_dir, exist_ok=True)
+    subprocess.run([
+        sys.executable, "-m", "huggingface_hub", "download",
+        BF16_MODEL_ID,
         "--local-dir", target_dir,
         "--local-dir-use-symlinks", "False",
     ], check=True)
     print("[下载] 完成")
 
 
+# ── Kaggle 错误提示 ───────────────────────────────────────────────────────────
+
+def _abort_kaggle_missing(dir_name, backend):
+    print("\n" + "=" * 60)
+    if backend == "llamacpp":
+        print("[Kaggle] 未找到 GGUF 模型文件")
+        print()
+        print("请在 Notebook 右侧面板操作：")
+        print("  1. 点击 '+ Add Input' → 'Models'")
+        print(f"  2. 搜索 '{GGUF_REPO_ID}'")
+        print("  3. Add 后重新运行脚本")
+        print()
+        print("或者直接在 notebook cell 中运行：")
+        print(f"  !huggingface-cli download {GGUF_REPO_ID} {GGUF_FILENAME} \\")
+        print(f"      --local-dir /kaggle/working/{GGUF_DIR_NAME}")
+    else:
+        print("[Kaggle] 未找到 BF16 模型目录")
+        print()
+        print("请在 Notebook 右侧面板操作：")
+        print("  1. 点击 '+ Add Input' → 'Models'")
+        print(f"  2. 搜索 '{BF16_MODEL_ID}'")
+        print("  3. Add 后重新运行脚本")
+    print("=" * 60)
+    sys.exit(1)
+
+
 # ── 依赖安装 ──────────────────────────────────────────────────────────────────
 
-def install_dependencies():
-    print("[依赖] 安装 vLLM + transformers + ui-tars ...")
-    subprocess.run([
-        sys.executable, "-m", "pip", "install", "-q",
-        "vllm==0.6.6",
-        "transformers>=4.45.0",
-        "huggingface_hub>=0.24.0",
-        "ui-tars",
-        "--extra-index-url", "https://download.pytorch.org/whl/cu124",
-    ], check=True)
-    print("[依赖] 安装完成")
+def install_dependencies(backend):
+    if backend == "llamacpp":
+        print("[依赖] 安装 llama-cpp-python (CUDA) + huggingface_hub ...")
+        # 预编译 CUDA wheel，避免从源码编译
+        subprocess.run([
+            sys.executable, "-m", "pip", "install", "-q",
+            "llama-cpp-python[server]",
+            "--extra-index-url",
+            "https://abetlen.github.io/llama-cpp-python/whl/cu124",
+        ], check=True)
+        subprocess.run([
+            sys.executable, "-m", "pip", "install", "-q",
+            "huggingface_hub>=0.24.0",
+            "ui-tars",
+        ], check=True)
+    else:
+        print("[依赖] 安装 vLLM + transformers + huggingface_hub ...")
+        subprocess.run([
+            sys.executable, "-m", "pip", "install", "-q",
+            "vllm==0.6.6",
+            "transformers>=4.45.0",
+            "huggingface_hub>=0.24.0",
+            "ui-tars",
+            "--extra-index-url", "https://download.pytorch.org/whl/cu124",
+        ], check=True)
+    print("[依赖] 完成")
 
 
-# ── vLLM 启动 ─────────────────────────────────────────────────────────────────
+# ── 服务启动 ──────────────────────────────────────────────────────────────────
 
-def launch_vllm(model_path, cfg, host="0.0.0.0", port=8000):
+def launch_llamacpp(model_path, gpu_count, host, port):
+    """启动 llama-cpp-python OpenAI 兼容服务"""
+    # -1 = 所有层放 GPU；无 GPU 则设 0
+    n_gpu_layers = -1 if gpu_count > 0 else 0
+    cmd = [
+        sys.executable, "-m", "llama_cpp.server",
+        "--model", model_path,
+        "--host", host,
+        "--port", str(port),
+        "--n_gpu_layers", str(n_gpu_layers),
+        "--n_ctx", "8192",
+    ]
+    print(f"\n[启动] llama.cpp server")
+    print("  " + " ".join(cmd))
+    print(f"\n服务就绪后访问: http://{host}:{port}/v1\n")
+    subprocess.run(cmd, check=True)
+
+
+def launch_vllm(model_path, host, port):
+    """启动 vLLM OpenAI 兼容服务（双卡 BF16）"""
     cmd = [
         sys.executable, "-m", "vllm.entrypoints.openai.api_server",
         "--served-model-name", "ui-tars",
@@ -238,12 +293,10 @@ def launch_vllm(model_path, cfg, host="0.0.0.0", port=8000):
         "--limit-mm-per-prompt", "image=5",
         "--host", host,
         "--port", str(port),
-        "-tp", str(cfg["tp"]),
+        "-tp", "2",
     ]
-    if cfg.get("kv_cache_dtype"):
-        cmd += ["--kv-cache-dtype", cfg["kv_cache_dtype"]]
-
-    print(f"\n[启动] {' '.join(cmd)}")
+    print(f"\n[启动] vLLM server (tp=2 BF16)")
+    print("  " + " ".join(cmd))
     print(f"\n服务就绪后访问: http://{host}:{port}/v1\n")
     subprocess.run(cmd, check=True)
 
@@ -252,19 +305,27 @@ def launch_vllm(model_path, cfg, host="0.0.0.0", port=8000):
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="UI-TARS vLLM 推理服务（自动检测环境）")
+    parser = argparse.ArgumentParser(description="UI-TARS 推理服务（自动检测环境和 GPU）")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--skip-install", action="store_true", help="跳过依赖安装")
     args = parser.parse_args()
 
-    if not args.skip_install:
-        install_dependencies()
+    env                      = detect_env()
+    gpu_count, vram_gb, names = detect_gpus()
+    backend                  = decide_backend(gpu_count, vram_gb, names)
 
-    env = detect_env()
-    gpu_count, vram_gb, gpu_names = detect_gpus()
-    model_path, vllm_cfg = resolve_model_and_config(env, gpu_count, vram_gb, gpu_names)
-    launch_vllm(model_path, vllm_cfg, host=args.host, port=args.port)
+    print(f"[环境] {env.upper()}  后端: {backend}")
+
+    if not args.skip_install:
+        install_dependencies(backend)
+
+    model_path = resolve_model_path(env, backend)
+
+    if backend == "llamacpp":
+        launch_llamacpp(model_path, gpu_count, args.host, args.port)
+    else:
+        launch_vllm(model_path, args.host, args.port)
 
 
 if __name__ == "__main__":

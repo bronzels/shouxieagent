@@ -1,4 +1,10 @@
+# 单卡路径（llama-cpp-python CUDA wheel 需单独安装，见 launch_server.py）
+# pip install llama-cpp-python[server] --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+
+# 双卡路径
 vllm==0.6.6
+
+# 公共
 transformers>=4.45.0
 huggingface_hub>=0.24.0
 openai>=1.0.0
