@@ -140,11 +140,21 @@ def save_applied_jobs(data: dict):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+# 只有这些 status 才永久去重（真正已投/站点已申请/已发请求）。
+# 筛选决策类（skipped_reject/skipped_region）依赖 filter_mode，切换模式后应重新判断，不去重。
+_DEDUP_BLOCKING_STATUS = {"applied", "skipped_applied"}
+
+
 def is_already_recorded(data: dict, company: str, position: str) -> bool:
-    """检查是否已记录（已申请 or 已跳过）"""
+    """检查是否【已投递/站点已申请】（仅这些状态去重）。
+
+    被筛选拒掉的记录（skipped_reject / skipped_region）不算去重——它们是某个
+    filter_mode 下的判断结果，切换模式（如 remote→hk-region）后需要重新评估。
+    """
     key = f"{company.strip()}|{position.strip()}"
     return any(
         f"{j['company'].strip()}|{j['position'].strip()}" == key
+        and j.get("status", "") in _DEDUP_BLOCKING_STATUS
         for j in data["jobs"]
     )
 
