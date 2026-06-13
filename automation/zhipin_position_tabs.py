@@ -144,6 +144,7 @@ class PositionTabsAutomator(BossZhipinAutomator):
 
     def __init__(self, dry_run=False):
         super().__init__(verify_fn=self._verify_mixed_bound, dry_run=dry_run)
+        self.task_label = "职位tab"  # CSV/断点任务标识
         # 深圳岗薪资字体反爬：拦截列表 API joblist.json 取明文 salaryDesc（不截图OCR）
         self.salary_map = {}
         self.salary_resolver = self._resolve_salary
@@ -375,13 +376,14 @@ class PositionTabsAutomator(BossZhipinAutomator):
             stat["checked"] += 1
             if status in stat:
                 stat[status] += 1
+            self._mark_processed(job.get("company", ""), job.get("title", ""), f"tab-{tab_name}")
             skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
             print(f"     [tab {tab_name}] 检查 {stat['checked']} | "
                   f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")
             if self.stop_requested:
                 print("  🛑 当日沟通次数已用完，停止脚本，明天再跑。", flush=True)
                 break
-            human_delay(DELAY_MIN, DELAY_MAX)
+            human_delay()
 
         # tab 阶段总结
         skipped_total = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
@@ -423,6 +425,7 @@ class PositionTabsAutomator(BossZhipinAutomator):
                 for tab_name in TABS_TO_PROCESS:
                     st = await self.process_tab(tab_name)
                     all_stats.append(st)
+                    self._flush_checkpoint(f"tab-{tab_name}")  # tab 处理完落盘断点
                     if self.stop_requested:
                         print("\n🛑 当日沟通次数已用完，停止处理剩余 tab，明天再跑。", flush=True)
                         break
@@ -431,6 +434,11 @@ class PositionTabsAutomator(BossZhipinAutomator):
                     rest = random.uniform(2.0, 3.5)
                     print(f"\n  tab 间休息 {rest:.1f}s...")
                     await asyncio.sleep(rest)
+
+                # 全部 tab 跑完（未被每日上限中断）→ 清除断点
+                if not self.stop_requested:
+                    import zhipin_apply as _za
+                    _za.clear_checkpoint(self.task_label)
 
                 # 全部 tab 汇总
                 print("\n" + "█" * 60)
@@ -455,7 +463,8 @@ class PositionTabsAutomator(BossZhipinAutomator):
             finally:
                 try:
                     save_applied_jobs(self.applied_data)
-                    csv_path = export_applications_csv(self.applied_data)
+                    csv_path = export_applications_csv(
+                        self.applied_data, label=self.task_label, since=self._run_started)
                     print(f"最终统计CSV已生成: {csv_path}")
                 except Exception as e:
                     print(f"[WARN] 导出CSV失败: {e}")
@@ -505,6 +514,10 @@ def _build_arg_parser():
                              "如 http://192.168.3.14:8000/v1")
     parser.add_argument("--dry-run", action="store_true",
                         help="试运行：搜索+判断+打印，但不点立即沟通/不发招呼/不记录。")
+    parser.add_argument("--speed", choices=["normal", "fast", "slow"], default="normal",
+                        help="操作延迟档位：normal(默认) | fast(快) | slow(慢/反爬)。触发安全验证会自动升 slow。")
+    parser.add_argument("--allow-paid-fallback", action="store_true",
+                        help="允许免费LLM/本地UI-TARS连续失败后升级到OpenRouter收费LLM/UI-TARS兜底。默认关。")
     return parser
 
 
@@ -512,6 +525,10 @@ def main():
     import zhipin_apply as za
     parser = _build_arg_parser()
     args = parser.parse_args()
+
+    za.apply_speed_profile(args.speed)
+    za.ALLOW_PAID_FALLBACK = args.allow_paid_fallback
+    print(f"⚙️ 操作延迟档位: {args.speed} | 收费兜底: {'开' if args.allow_paid_fallback else '关'}", flush=True)
 
     if args.openrouter_key:
         za.OPENROUTER_API_KEY = args.openrouter_key

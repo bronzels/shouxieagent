@@ -85,6 +85,8 @@ VERIFY_MODELS_MULTIMODAL_PAID = [
 MIN_DESC_LEN = 40
 
 APPLIED_JOBS_FILE = Path(__file__).parent / "applied_jobs.json"
+# 断点续跑文件：按任务记录已处理职位 + 当前城市，重启后从断点继续，不必从头
+CHECKPOINT_FILE = Path(__file__).parent / "zhipin_checkpoint.json"
 SCREENSHOTS_DIR = Path(__file__).parent / "screenshots"
 SCREENSHOTS_DIR.mkdir(exist_ok=True)
 # 最终统计 CSV 单独目录
@@ -117,15 +119,51 @@ CITY_CODES = {
 }
 DEFAULT_HOT_CITIES = list(CITY_CODES.keys())
 
-# 人类操作延迟范围（秒）
-# 策略：检查/跳过的职位走快速延迟（读取动作为主，对 zhipin 真实请求少，风险低）；
-#       真正投递（立即沟通发招呼）走稳健延迟（发真实消息，且有每日打招呼上限，需谨慎）。
-DELAY_MIN = 0.3          # 职位间隔（检查阶段，已调快）
-DELAY_MAX = 0.7
-CARD_DELAY_MIN = 0.4     # 点职位卡→详情面板（检查阶段，已调快）
-CARD_DELAY_MAX = 0.9
-APPLY_DELAY_MIN = 1.5    # 投递动作（立即沟通后，已调快但仍留余量）
-APPLY_DELAY_MAX = 2.5
+# 人类操作延迟范围（秒）——三档可调，命令行 --speed normal|fast|slow 切换。
+#   normal：旧的稳健值（默认）   fast：快档（少等待，量大时用）   slow：慢档（触发反爬时用）
+# 含义：DELAY=职位间隔；CARD=点卡→详情；APPLY=投递(发招呼)后；
+#       SCROLL=滚动懒加载每次等待；CITY_REST=城市间休息。
+SPEED_PROFILES = {
+    "normal": {  # 旧的正常值（之前调快前的稳健档）
+        "DELAY": (0.8, 1.8), "CARD": (1.2, 2.2), "APPLY": (3.0, 5.0),
+        "SCROLL": (0.9, 1.6), "CITY_REST": (5.0, 10.0),
+    },
+    "fast": {    # 当前快档
+        "DELAY": (0.3, 0.7), "CARD": (0.4, 0.9), "APPLY": (1.5, 2.5),
+        "SCROLL": (0.4, 0.8), "CITY_REST": (2.0, 4.0),
+    },
+    "slow": {    # 慢档（触发反爬/安全验证后自动切到此档，或手动指定）
+        "DELAY": (2.0, 4.0), "CARD": (3.0, 5.0), "APPLY": (6.0, 10.0),
+        "SCROLL": (1.6, 2.8), "CITY_REST": (12.0, 22.0),
+    },
+}
+SPEED_TIER = "normal"  # 当前档位（main 里按 --speed 设置，反爬触发时升级到 slow）
+
+# 以下模块级延迟变量由 apply_speed_profile() 按档位填充；默认用 normal。
+DELAY_MIN, DELAY_MAX = SPEED_PROFILES["normal"]["DELAY"]
+CARD_DELAY_MIN, CARD_DELAY_MAX = SPEED_PROFILES["normal"]["CARD"]
+APPLY_DELAY_MIN, APPLY_DELAY_MAX = SPEED_PROFILES["normal"]["APPLY"]
+SCROLL_WAIT_MIN, SCROLL_WAIT_MAX = SPEED_PROFILES["normal"]["SCROLL"]
+CITY_REST_MIN, CITY_REST_MAX = SPEED_PROFILES["normal"]["CITY_REST"]
+
+
+def apply_speed_profile(tier: str):
+    """按档位设置所有延迟全局变量。tier ∈ {normal, fast, slow}。"""
+    global SPEED_TIER, DELAY_MIN, DELAY_MAX, CARD_DELAY_MIN, CARD_DELAY_MAX
+    global APPLY_DELAY_MIN, APPLY_DELAY_MAX, SCROLL_WAIT_MIN, SCROLL_WAIT_MAX
+    global CITY_REST_MIN, CITY_REST_MAX
+    p = SPEED_PROFILES.get(tier, SPEED_PROFILES["normal"])
+    SPEED_TIER = tier if tier in SPEED_PROFILES else "normal"
+    DELAY_MIN, DELAY_MAX = p["DELAY"]
+    CARD_DELAY_MIN, CARD_DELAY_MAX = p["CARD"]
+    APPLY_DELAY_MIN, APPLY_DELAY_MAX = p["APPLY"]
+    SCROLL_WAIT_MIN, SCROLL_WAIT_MAX = p["SCROLL"]
+    CITY_REST_MIN, CITY_REST_MAX = p["CITY_REST"]
+
+
+# 收费/OpenRouter 兜底总开关（命令行 --allow-paid-fallback 打开；默认关）。
+# 打开后：免费 LLM 连续失败→升级收费 LLM；本地 UI-TARS 连续失败→切 OpenRouter UI-TARS。
+ALLOW_PAID_FALLBACK = False
 
 # 城市完成标记按【日历日期】判断：同一天重跑跳过，不同日期（隔天）则重新处理
 
@@ -212,37 +250,103 @@ def mark_city_completed(data: dict, city: str):
     print(f"  🏁 城市 [{city}] 处理完成，已记录 {now}（当天重跑将跳过，隔天可重跑）")
 
 
-def export_applications_csv(data: dict) -> str:
+# ─── 断点续跑（checkpoint）────────────────────────────────────────────────────────
+# 记录每个任务【今天】已处理过的职位 key（公司|职位）和当前城市，程序崩溃/重启后
+# 跳过已处理的记录，从断点继续，不必从头。按日历日期作用域：隔天自动重新开始。
+
+def _today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def load_checkpoint(label: str) -> dict:
+    """读取某任务今天的断点。返回 {'processed': set(), 'current_city': str}。隔天/无则空。"""
+    try:
+        if CHECKPOINT_FILE.exists():
+            allcp = json.loads(CHECKPOINT_FILE.read_text(encoding="utf-8"))
+            cp = allcp.get(label)
+            if cp and cp.get("date") == _today_str():
+                return {"processed": set(cp.get("processed", [])),
+                        "current_city": cp.get("current_city", "")}
+    except Exception:
+        pass
+    return {"processed": set(), "current_city": ""}
+
+
+def _save_checkpoint(label: str, processed: set, current_city: str):
+    try:
+        allcp = {}
+        if CHECKPOINT_FILE.exists():
+            try:
+                allcp = json.loads(CHECKPOINT_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                allcp = {}
+        allcp[label] = {"date": _today_str(), "current_city": current_city,
+                        "processed": sorted(processed)}
+        CHECKPOINT_FILE.write_text(json.dumps(allcp, ensure_ascii=False, indent=2),
+                                   encoding="utf-8")
+    except Exception as e:
+        print(f"  [WARN] 保存断点失败: {e}", flush=True)
+
+
+def clear_checkpoint(label: str):
+    """任务完整跑完后清除该任务断点（下次从头）。"""
+    try:
+        if CHECKPOINT_FILE.exists():
+            allcp = json.loads(CHECKPOINT_FILE.read_text(encoding="utf-8"))
+            if label in allcp:
+                allcp.pop(label, None)
+                CHECKPOINT_FILE.write_text(json.dumps(allcp, ensure_ascii=False, indent=2),
+                                           encoding="utf-8")
+                print(f"  🧹 任务[{label}]完整跑完，已清除断点", flush=True)
+    except Exception:
+        pass
+
+
+def export_applications_csv(data: dict, label: str = None, since: str = None) -> str:
     """
     把投递记录导出为 CSV，放到单独的 reports/ 目录。
-    文件名包含【投递时间】+【搜索内容】，例如：
-      投递记录_远程软件_20260612_143000.csv
-    用 utf-8-sig（带 BOM），Excel 打开中文不乱码。
-    返回 CSV 文件路径。
+    - label：任务标识，决定文件名和表头（区分不同任务的 CSV）。
+      不传则用全局 SEARCH_KEYWORD（远程软件任务）。例：远程软件 / 大模型深圳 / 职位tab。
+    - since：只导出 applied_at >= since 的记录（本次运行起始时间戳），
+      避免把 applied_jobs.json 里历史累计的所有任务记录混进同一个 CSV。不传则导全部。
+    文件名例：投递记录_大模型深圳_20260613_213000.csv
+    用 utf-8-sig（带 BOM），Excel 打开中文不乱码。返回 CSV 路径。
     """
     import csv
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    kw = re.sub(r"\s+", "", SEARCH_KEYWORD)  # "远程 软件" -> "远程软件"
+    kw = re.sub(r"\s+", "", label or SEARCH_KEYWORD)
     fname = f"投递记录_{kw}_{ts}.csv"
     path = REPORTS_DIR / fname
+    jobs = data.get("jobs", [])
+    if since:
+        jobs = [j for j in jobs if (j.get("applied_at", "") or "") >= since]
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
-        # 表头：搜索内容 + 生成时间 作为元信息行，再写列名
-        w.writerow([f"搜索内容：{SEARCH_KEYWORD}",
+        w.writerow([f"任务：{label or SEARCH_KEYWORD}",
                     f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                    f"投递总数：{len(data.get('jobs', []))}",
-                    f"完成城市：{'/'.join(data.get('completed_cities', {}))}"])
-        w.writerow(["序号", "公司", "职位", "城市", "投递时间"])
-        for i, j in enumerate(data.get("jobs", []), 1):
+                    f"本次投递数：{len(jobs)}",
+                    (f"统计区间：{since} 起" if since else "统计区间：全部历史")])
+        w.writerow(["序号", "公司", "职位", "城市/来源", "投递时间"])
+        for i, j in enumerate(jobs, 1):
             w.writerow([i, j.get("company", ""), j.get("position", ""),
                         j.get("city", ""), j.get("applied_at", "")])
     return str(path)
 
 
-def human_delay(min_s: float = DELAY_MIN, max_s: float = DELAY_MAX):
-    """模拟人类随机延迟"""
-    t = random.uniform(min_s, max_s)
-    time.sleep(t)
+def human_delay(min_s: float = None, max_s: float = None):
+    """模拟人类随机延迟。默认用当前档位的 DELAY_MIN/MAX（运行时由 --speed 决定）。"""
+    lo = DELAY_MIN if min_s is None else min_s
+    hi = DELAY_MAX if max_s is None else max_s
+    time.sleep(random.uniform(lo, hi))
+
+
+def _prompt_once(msg: str = ""):
+    """阻塞式等待用户回车（放在 executor 里调用，避免阻塞事件循环）。EOF/无终端时静候。"""
+    try:
+        return input(msg)
+    except (EOFError, OSError):
+        time.sleep(5)
+        return ""
 
 
 def image_to_base64(image_path: str) -> str:
@@ -343,7 +447,11 @@ async def _post_openrouter(payload: dict, models: list = None, max_rounds: int =
             await asyncio.sleep(wait)
             delay = min(delay * 2, 40)
 
-    # 免费链多轮仍失败 → 升级收费模型兜底
+    # 免费链多轮仍失败 → 升级收费模型兜底（仅当 --allow-paid-fallback 打开）
+    if not ALLOW_PAID_FALLBACK:
+        raise RuntimeError(
+            f"OpenRouter 免费模型多轮重试仍失败: {last_err}"
+            f"（未开启 --allow-paid-fallback，不升级收费模型）")
     if paid_models is None:
         paid_models = (VERIFY_MODELS_MULTIMODAL_PAID if _is_multimodal_payload(payload)
                        else VERIFY_MODELS_TEXT_PAID)
@@ -432,19 +540,26 @@ async def call_uitars(image_path: str, task_prompt: str) -> str:
         "max_tokens": 512,
     }
 
-    # 容错重试：UI-TARS（本地 llama-cpp / remote / openrouter）可能瞬时失败或返回空，
-    # 重试若干次（指数退避）。openrouter 方式内部已有模型 fallback，这里再加一层调用级重试。
+    async def _call_provider(provider: str) -> str:
+        """按 provider 发一次请求并取 content；失败抛异常、空响应返回空串。"""
+        if provider == "remote":
+            result = await _post_uitars_remote(payload)
+        elif provider == "local":
+            result = await _post_uitars_local(payload)
+        else:  # openrouter
+            # openrouter UI-TARS 走 bytedance/ui-tars 模型（收费）；单模型，不走免费 verify 链
+            payload["model"] = UITARS_MODEL
+            result = await _post_openrouter(payload, models=[UITARS_MODEL], paid_models=[])
+        content = result["choices"][0]["message"]["content"]
+        return content if (content and content.strip()) else ""
+
+    # 容错重试：当前 provider 重试 3 次（指数退避）。本地/remote 连续失败后，
+    # 若开启 --allow-paid-fallback，则切换到 OpenRouter UI-TARS 再试（用户要求）。
     last_err = None
     for attempt in range(3):
         try:
-            if UITARS_PROVIDER == "remote":
-                result = await _post_uitars_remote(payload)
-            elif UITARS_PROVIDER == "local":
-                result = await _post_uitars_local(payload)
-            else:  # openrouter（默认）
-                result = await _post_openrouter(payload)
-            content = result["choices"][0]["message"]["content"]
-            if content and content.strip():
+            content = await _call_provider(UITARS_PROVIDER)
+            if content:
                 return content
             last_err = "空响应"
         except Exception as e:
@@ -452,7 +567,20 @@ async def call_uitars(image_path: str, task_prompt: str) -> str:
         if attempt < 2:
             print(f"  ⏳ UI-TARS({UITARS_PROVIDER}) 调用失败({last_err})，重试 ({attempt+1}/3)", flush=True)
             await asyncio.sleep(2.0 * (attempt + 1))
-    print(f"  [WARN] UI-TARS({UITARS_PROVIDER}) 重试 3 次仍失败: {last_err}", flush=True)
+
+    # 本地/remote 连续失败 → 切 OpenRouter UI-TARS 兜底（需 --allow-paid-fallback）
+    if UITARS_PROVIDER in ("local", "remote") and ALLOW_PAID_FALLBACK:
+        print(f"  💳 本地 UI-TARS 连续失败({last_err})，切换到 OpenRouter UI-TARS 兜底", flush=True)
+        for attempt in range(2):
+            try:
+                content = await _call_provider("openrouter")
+                if content:
+                    print("  ✅ OpenRouter UI-TARS 兜底成功", flush=True)
+                    return content
+            except Exception as e:
+                last_err = str(e)[:80]
+            await asyncio.sleep(2.0)
+    print(f"  [WARN] UI-TARS 重试仍失败: {last_err}", flush=True)
     return ""
 
 
@@ -733,6 +861,10 @@ class BossZhipinAutomator:
         self.verify_fn = verify_fn  # 可注入的职位判断函数
         self.dry_run = dry_run
         self.stop_requested = False  # 当日沟通次数用完时置 True，各处理循环检测后停止
+        # 本次运行起始时间戳：用于 CSV 只导出本轮投递（避免混入历史累计记录）
+        self._run_started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # CSV/断点任务标识（子类覆盖：远程软件 / 大模型深圳 / 职位tab）
+        self.task_label = re.sub(r"\s+", "", SEARCH_KEYWORD)
         # 可注入的薪资解析器：async (page) -> 真实薪资字符串。
         # 用于应对字体反爬（薪资文本被混淆），由需要薪资过滤的任务（如大模型深圳）设置为
         # 截图+多模态读取。默认 None，apply_to_job 直接用职位卡的 salary 文本。
@@ -783,8 +915,88 @@ class BossZhipinAutomator:
         human_delay(1.2, 2.0)
         title = await self.page.title()
         print(f"  页面标题: {title} | URL: {self.page.url}", flush=True)
-        if "验证" in title or "security" in self.page.url.lower():
-            print("  ⚠️ 疑似触发安全验证页面，请在浏览器中手动完成验证", flush=True)
+        await self._check_anti_scrape()
+
+    async def _detect_verify(self) -> bool:
+        """仅检测当前页是否为安全验证页（不处理）。基于实地观察的 BOSS直聘 Geetest 验证：
+          - URL 落到 /web/passport/zp/verify.html
+          - 标题"安全验证 - BOSS直聘"
+          - DOM 出现 .verify-container / .geetest_holder / .geetest_radar_btn 等
+        点击"点击按钮进行验证"会升级到【图标点选】图片题（需人工解），故只检测、不自动点。
+        """
+        try:
+            url = (self.page.url or "").lower()
+            if "passport/zp/verify" in url or "verify.html" in url:
+                return True
+            title = (await self.page.title()) or ""
+            if "安全验证" in title:
+                return True
+            for sel in [".verify-container", ".page-verify", ".geetest_holder",
+                        ".geetest_radar_btn", "#verifyMsg"]:
+                try:
+                    el = await self.page.query_selector(sel)
+                    if el and await el.is_visible():
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
+    async def _check_anti_scrape(self) -> bool:
+        """每次关键操作前调用：检测安全验证；命中则①升级 slow 延迟档②停下提示用户手动处理。
+
+        返回 True 表示检测到验证并已暂停处理。实地验证确认：点击验证按钮会进入图标点选
+        图片题，无法可靠自动解（且运行时禁用多模态OCR）——所以一律交给用户手动完成。
+        """
+        if not await self._detect_verify():
+            return False
+        # ① 操作太频繁触发反爬 → 自动升级到 slow 延迟档（若还不是）
+        if SPEED_TIER != "slow":
+            print(f"  🐢 检测到安全验证(反爬)，操作过频 → 延迟档 {SPEED_TIER} 升级到 slow", flush=True)
+            apply_speed_profile("slow")
+        # ② 截图 + 暂停等用户在浏览器手动完成验证
+        print("\n  🛑 检测到【安全验证】页面（触发反爬）。请在浏览器中手动完成验证（点击按钮→"
+              "完成图标点选）。", flush=True)
+        try:
+            await screenshot_page(self.page, "anti_scrape_verify.png")
+        except Exception:
+            pass
+        # 轮询等待用户解除验证（页面离开 verify 页即视为完成）；最长等 10 分钟
+        for i in range(120):
+            try:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, _prompt_once, "  完成验证后按 Enter 继续（或等待自动检测）... ")
+            except Exception:
+                await asyncio.sleep(5)
+            if not await self._detect_verify():
+                print("  ✅ 安全验证已解除，继续运行", flush=True)
+                return True
+            print("  ⏳ 仍在验证页，请完成验证...", flush=True)
+        print("  ⚠️ 等待验证超时（10分钟），继续尝试", flush=True)
+        return True
+
+    async def _guard(self) -> bool:
+        """操作前守卫：检测到验证返回 True（调用方应跳过本次操作/重试）。供各操作循环调用。"""
+        return await self._check_anti_scrape()
+
+    def _mark_processed(self, company: str, title: str, city: str = ""):
+        """断点续跑：标记一个职位已处理（判断完），并周期性落盘断点文件。"""
+        if not hasattr(self, "_ckpt_processed"):
+            self._ckpt_processed = load_checkpoint(getattr(self, "task_label", ""))["processed"]
+        key = f"{(company or '').strip()}|{(title or '').strip()}"
+        self._ckpt_processed.add(key)
+        # 每处理 5 个落盘一次（降低 IO，崩溃最多丢几条）
+        self._ckpt_dirty = getattr(self, "_ckpt_dirty", 0) + 1
+        if self._ckpt_dirty >= 5:
+            _save_checkpoint(getattr(self, "task_label", ""), self._ckpt_processed, city)
+            self._ckpt_dirty = 0
+
+    def _flush_checkpoint(self, city: str = ""):
+        """强制落盘当前断点（城市切换/结束时调用）。"""
+        if hasattr(self, "_ckpt_processed"):
+            _save_checkpoint(getattr(self, "task_label", ""), self._ckpt_processed, city)
+            self._ckpt_dirty = 0
 
     async def _is_logged_in_on_home(self) -> bool:
         """
@@ -1067,7 +1279,7 @@ class BossZhipinAutomator:
                 await self.page.mouse.wheel(0, 1400)
             except Exception:
                 pass
-            human_delay(0.4, 0.8)
+            human_delay(SCROLL_WAIT_MIN, SCROLL_WAIT_MAX)
             n = await _count()
             if n <= last:
                 stable += 1
@@ -1307,6 +1519,14 @@ class BossZhipinAutomator:
         company = job.get("company", "")
         title = job.get("title", "")
 
+        # 断点续跑：本次/今天已处理过(判断过)的职位直接跳过，不重复点击/LLM判断
+        if not hasattr(self, "_ckpt_processed"):
+            self._ckpt_processed = load_checkpoint(getattr(self, "task_label", ""))["processed"]
+        _ckey = f"{company.strip()}|{title.strip()}"
+        if _ckey in self._ckpt_processed:
+            print(f"  ⏭️  [断点跳过-已处理] {company} | {title}")
+            return "dup"
+
         if is_already_applied(self.applied_data, company, title):
             print(f"  ⏭️  [跳过-已投递] {company} | {title}")
             return "dup"
@@ -1328,12 +1548,17 @@ class BossZhipinAutomator:
         self._current_company = job.get("company", "")
 
         try:
+            # 操作前守卫：检测到安全验证则暂停等用户处理（每个职位点击前都检测，避免空跑卡住）
+            await self._check_anti_scrape()
             # 点职位卡 → 详情面板（检查阶段，快速延迟）
             # ⚠️ 不能用 get_job_listings 时存下的 ElementHandle：Boss直聘 SPA 列表会持续
             # 重渲染（点开详情/轮询刷新），存的句柄会 detach（"Element is not attached"）。
             # 用 Playwright Locator（点击时才解析、自动重试/滚动），对重渲染免疫。
             clicked = await self._click_card_by_text(title, company)
             if not clicked:
+                # 可能是验证页挡住了列表：再检测一次，若是验证则等用户处理后让上层重试
+                if await self._check_anti_scrape():
+                    return "fail"
                 print(f"  [WARN] 未能定位/点击职位卡，跳过: {company} | {title}")
                 return "fail"
             human_delay(CARD_DELAY_MIN, CARD_DELAY_MAX)
@@ -1471,6 +1696,8 @@ class BossZhipinAutomator:
         # 同一批首屏 15 个，去重后等于只处理首屏，漏掉本次搜索 80%+ 的职位。
         # 现改为：goto 第 1 页 → get_job_listings 内部滚动到底加载全部 → 一次性处理。
         any_page_ok = False
+        # 切城市/进列表后先检测安全验证（导航是最易触发反爬的时机）
+        await self._check_anti_scrape()
         if not await self.goto_list(city, 1):
             print(f"  ❌ 列表无职位，跳过城市: {city}")
         else:
@@ -1488,6 +1715,8 @@ class BossZhipinAutomator:
                     stat["checked"] += 1
                     if status in stat:
                         stat[status] += 1
+                    # 断点续跑：记录此职位已处理（含判断完跳过的），落盘
+                    self._mark_processed(job.get("company", ""), job.get("title", ""), city)
                     # 实时累计进度提示
                     skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
                     print(f"     ▸ [{city}] 进度：检查 {stat['checked']}/{len(jobs)} | "
@@ -1550,15 +1779,20 @@ class BossZhipinAutomator:
                     st = await self.process_city(city)
                     if st:
                         city_stats.append(st)
+                    self._flush_checkpoint(city)  # 城市处理完落盘断点
 
                     if self.stop_requested:
                         print("\n🛑 当日沟通次数已用完，停止所有城市处理，明天再跑。", flush=True)
                         break
 
-                    # 城市间休息（防止触发反爬，已调快）
-                    rest_time = random.uniform(2.0, 4.0)
+                    # 城市间休息（防止触发反爬，按速度档位）
+                    rest_time = random.uniform(CITY_REST_MIN, CITY_REST_MAX)
                     print(f"\n  😴 城市间休息 {rest_time:.1f} 秒...")
                     await asyncio.sleep(rest_time)
+
+                # 全部城市处理完（未被每日上限中断）→ 任务完整完成，清除断点
+                if not self.stop_requested:
+                    clear_checkpoint(self.task_label)
 
                 # 全部城市总汇总
                 print("\n" + "█"*60)
@@ -1603,7 +1837,8 @@ class BossZhipinAutomator:
                 # 程序结束前（无论正常跑完/中断/报错）都把 json 转成 csv
                 try:
                     save_applied_jobs(self.applied_data)
-                    csv_path = export_applications_csv(self.applied_data)
+                    csv_path = export_applications_csv(
+                        self.applied_data, label=self.task_label, since=self._run_started)
                     print(f"📑 最终统计CSV已生成: {csv_path}")
                 except Exception as e:
                     print(f"[WARN] 导出CSV失败: {e}")
@@ -1674,15 +1909,31 @@ def _build_arg_parser():
         "--uitars-local-model", default=None,
         help="local 方式下模型名称（通常是 GGUF 文件路径）。默认 None → 自动从 /v1/models 取第一个。",
     )
+    parser.add_argument(
+        "--speed", choices=["normal", "fast", "slow"], default="normal",
+        help="操作延迟档位：normal(默认,稳健) | fast(快,量大时用) | slow(慢,触发反爬时用)。"
+             "触发安全验证时会自动升级到 slow。",
+    )
+    parser.add_argument(
+        "--allow-paid-fallback", action="store_true",
+        help="允许在免费 LLM / 本地 UI-TARS 连续失败后，升级到 OpenRouter 收费 LLM / "
+             "OpenRouter UI-TARS 兜底。默认关闭（只用免费/本地）。",
+    )
     return parser
 
 
 def main():
     """解析命令行参数，赋值到模块级全局变量后启动自动投递。"""
     global OPENROUTER_API_KEY, UITARS_PROVIDER, UITARS_ENDPOINT, UITARS_KEY, UITARS_LOCAL_URL, UITARS_LOCAL_MODEL
+    global ALLOW_PAID_FALLBACK
 
     parser = _build_arg_parser()
     args = parser.parse_args()
+
+    # 延迟档位 + 收费兜底开关
+    apply_speed_profile(args.speed)
+    ALLOW_PAID_FALLBACK = args.allow_paid_fallback
+    print(f"⚙️ 操作延迟档位: {args.speed} | 收费兜底: {'开' if ALLOW_PAID_FALLBACK else '关'}", flush=True)
 
     # OpenRouter key：命令行 > 环境变量/.env（保留现有回退方式）
     if args.openrouter_key:
