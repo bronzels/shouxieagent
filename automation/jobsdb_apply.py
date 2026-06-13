@@ -73,10 +73,23 @@ LOGIN_EMAIL = "bronzels@hotmail.com"
 # 默认薪资（职位无薪资范围时填写）：月薪 40000 港币（已与主人确认为月薪）
 DEFAULT_SALARY_HKD = 40000
 
+# ─── 申请表单"雇主问题"答题配置 ───────────────────────────────────────────────────
+# JobsDB apply 第2步是动态雇主问题（每职位不同）。以下为通用答题规则配置。
+#
+# HK 工作权利问题答案（radio，单选）。主人指示选 TTPS：
+# 对应选项 "I have a temporary visa (eg. QMAS, TTPS, IANG)"。匹配用子串 "TTPS"。
+RIGHT_TO_WORK_HK = "TTPS"
+# 候选人掌握的编程语言（编程语言勾选题：与选项文本【精确匹配】才勾选，避免 c 命中 CSS/Scala）
+CANDIDATE_LANGUAGES = ["python", "java", "c++", "c#", "javascript", "c", "sql"]
+# 经验类下拉永远选"经验最多"的最优项（主人指示）
+EXPERIENCE_PICK_MAX = True
+
 # 持久化 profile 目录（独立于 zhipin，避免互相污染）
 JOBSDB_PROFILE_DIR = Path(__file__).parent / "jobsdb_profile"
 
 APPLIED_JOBS_FILE = Path(__file__).parent / "jobsdb_applied.json"
+# 雇主问题 catalog：持久化所有遇到过的动态问题（题型/选项/答题情况），不删旧题
+QUESTIONS_CATALOG_FILE = Path(__file__).parent / "jobsdb_questions.json"
 SCREENSHOTS_DIR = Path(__file__).parent / "screenshots"
 SCREENSHOTS_DIR.mkdir(exist_ok=True)
 REPORTS_DIR = Path(__file__).parent / "reports"
@@ -973,186 +986,344 @@ class JobsDBAutomator:
 
     async def fill_apply_form(self, job: dict) -> bool:
         """
-        填写申请表单。JobsDB apply 流程通常分多步：
-          Step 1: 简历选择（已有上传的简历，直接 Continue）
-          Step 2: Cover Letter 选择 → 选"不附/No cover letter"
-          Step 3: 薪资要求 → 填写计算好的金额
-          Step 4: 其他问题（可能有额外问卷）→ 尽力填写，不确定时暂停
-          Step 5: 最终提交
+        填写 JobsDB 原生 Quick apply 表单（已实测 DOM 结构，2026-06-13）。
 
-        因为没有真实运行浏览器，以下选择器均为最佳猜测 + TODO 标注。
-
-        TODO 清单（调试时逐一核实）：
-          1. Apply 按钮弹出的是新页面/新 tab 还是模态框（modal）？
-          2. 简历步骤：是否需要手动选择简历？选择器？
-          3. Cover letter 选项：
-             - "No cover letter" / "Don't include a cover letter"
-             - 可能是 radio button 或 dropdown
-          4. 薪资输入框：
-             - 是 input[type='number'] 还是 input[type='text']？
-             - 是否有"per month"/"per annum"单位选择？
-             - TODO: 确认单位（月薪/年薪）
-          5. 其他问题：因职位而异，无法预先列举全部选择器
-          6. 最终"Submit"/"Send Application"按钮选择器
+        流程为独立页 /job/<id>/apply 的多步骤，每步点 Continue 推进：
+          Step 1  Choose documents (/apply)
+                  - Resume:  input[name='resume-method'][value='change'] (用已上传简历)
+                  - Cover letter: input[name='coverLetter-method'][value='none'] (不附)
+                  - Continue
+          Step 2  Answer employer questions (/apply/role-requirements)
+                  - 动态 questionnaire.* 题（经验/薪资/HK工作权利/语言/技能…）
+                  - 见 _answer_employer_questions（规则化答题）
+                  - Continue
+          Step 3  Update Jobsdb Profile  → Continue（跳过，不改资料）
+          Step 4  Review and submit      → Submit application
         """
         salary_to_fill = parse_salary_fill(job.get("salary", ""))
-        print(f"  💰 薪资填写: {salary_to_fill} HKD/月（来源: {job.get('salary', '无范围→默认40K')}）",
+        print(f"  \U0001f4b0 期望月薪: {salary_to_fill} HKD（来源: {job.get('salary', '无范围→默认40K')}）",
               flush=True)
 
-        # ── Step 1: 等待申请表单弹出 ──────────────────────────────────────────────
-        # TODO: 确认 apply 后是模态框还是跳转新页面
-        human_delay(2.0, 3.5)
-        await screenshot_page(self.page, f"jobsdb_apply_form_start_{self._safe_name(job)}.png")
+        # 等申请页加载（点 Apply 后是整页导航到 /apply）
+        try:
+            await self.page.wait_for_url("**/apply**", timeout=15000)
+        except Exception:
+            pass
+        human_delay(1.2, 2.0)
+        cur_url = self.page.url
+        # 第三方/外部跳转：不在 hk.jobsdb.com 的 /apply 流程 → 跳过（主人指示）
+        if "jobsdb.com" not in cur_url or "/apply" not in cur_url:
+            print(f"  ⏭️  [跳过-第三方投递] 申请跳转到外部页面: {cur_url[:80]}", flush=True)
+            return False
+        await screenshot_page(self.page, f"jobsdb_apply_step1_{self._safe_name(job)}.png")
 
-        # ── Step 2: 简历步骤 ───────────────────────────────────────────────────────
-        # TODO: 选择已上传的简历（通常列表中已有，直接 Continue）
-        resume_continue = await self._click_smart(
-            self.page,
-            [
-                "button:has-text('Continue')",
-                "button:has-text('Next')",
-                "[data-automation='continue-button']",
-            ],
-            "找到申请表单第一步的 Continue 或 Next 按钮，点击它继续。",
-            f"jobsdb_resume_step_{self._safe_name(job)}.png",
-        )
-        if resume_continue:
-            human_delay(1.5, 2.5)
+        # ── Step 1: Choose documents ──────────────────────────────────────────────
+        # 简历：选"Select a resumé"（用已上传简历）。选 change 后会出现一个简历下拉，
+        # 必须再从下拉里选中具体简历文件，否则校验拦截 "Please make a selection"。
+        try:
+            r = await self.page.query_selector("input[name='resume-method'][value='change']")
+            if r:
+                await r.check()
+                human_delay(0.5, 0.9)
+                # 选 change 后出现简历下拉：用 Playwright select_option（触发真实事件，React 才更新）
+                picked_resume = None
+                for sel_el in await self.page.query_selector_all("select"):
+                    try:
+                        opt_texts = await sel_el.eval_on_selector_all(
+                            "option", "els => els.map(e => e.textContent.trim())")
+                        # 命中简历下拉：含 placeholder 'please select a resum' 或 .pdf/.doc 选项
+                        if any(re.search(r"please select a resum|\.pdf|\.doc", t, re.I)
+                               for t in opt_texts):
+                            # 选第一个非 placeholder 的真实简历
+                            for t in opt_texts:
+                                if not re.search(r"please select", t, re.I) and t.strip():
+                                    await sel_el.select_option(label=t)
+                                    picked_resume = t
+                                    break
+                            break
+                    except Exception:
+                        continue
+                if picked_resume:
+                    print(f"  ✅ 简历: {picked_resume}", flush=True)
+                else:
+                    print("  ✅ 简历: 使用已上传简历(默认)", flush=True)
+                human_delay(0.3, 0.6)
+        except Exception as e:
+            print(f"  [WARN] 选简历失败: {e}", flush=True)
+        # Cover letter：选"Don't include a cover letter"
+        try:
+            c = await self.page.query_selector("input[name='coverLetter-method'][value='none']")
+            if c:
+                await c.check()
+                human_delay(0.4, 0.8)
+                print("  ✅ Cover letter: 不附", flush=True)
+        except Exception as e:
+            print(f"  [WARN] 选 cover letter 失败: {e}", flush=True)
 
-        # ── Step 3: Cover Letter 选"无/不附" ─────────────────────────────────────
-        # TODO: 调试时确认 "No cover letter" 选项的实际选择器和文本
-        cover_letter_no = await self._click_smart(
-            self.page,
-            [
-                # radio / button 类型
-                "input[type='radio'][value*='no' i]",
-                "label:has-text('No cover letter')",
-                "label:has-text('Don\\'t include')",
-                "label:has-text('No, thanks')",
-                "button:has-text('No cover letter')",
-                "span:has-text('No cover letter')",
-                # 下拉框中的选项
-                "option:has-text('No cover letter')",
-                "option[value*='none' i]",
-                "[data-automation='no-cover-letter']",
-            ],
-            "在 Cover Letter 选择区域，找到并点击 'No cover letter' 或 '不附申请书' 选项。",
-            f"jobsdb_cover_letter_{self._safe_name(job)}.png",
-        )
-        if not cover_letter_no:
-            # 申请表单尚未摸清，必须前台人工处理：暂停等用户在浏览器操作（前台运行才有效）
-            print("  ⚠️ 未能自动选择 No cover letter，请在浏览器手动处理后回到终端", flush=True)
-            await screenshot_page(self.page, f"jobsdb_cover_letter_manual_{self._safe_name(job)}.png")
-            user_action = input("  已手动处理 cover letter？输入 'ok' 继续 / 'skip' 跳过此职位: ").strip().lower()
-            if user_action != "ok":
+        if not await self._click_continue("step1-documents", job):
+            print("  ⚠️ Step1 未能点 Continue", flush=True)
+            return False
+        human_delay(1.2, 2.0)
+
+        # ── Step 2: Answer employer questions（动态题）──────────────────────────────
+        # 只有当本步确实是问卷页时才答题（部分职位无此步，会直接到 review）
+        if "role-requirements" in self.page.url:
+            await self._answer_employer_questions(job, salary_to_fill)
+            if not await self._click_continue("step2-questions", job):
+                print("  ⚠️ Step2 未能点 Continue（可能有必答题未填）", flush=True)
+                await screenshot_page(self.page, f"jobsdb_step2_stuck_{self._safe_name(job)}.png")
                 return False
-        else:
-            human_delay(1.0, 2.0)
+            human_delay(1.2, 2.0)
 
-        await self._click_smart(
-            self.page,
-            ["button:has-text('Continue')", "button:has-text('Next')",
-             "[data-automation='continue-button']"],
-            "找到 Continue 或 Next 按钮，进入下一步。",
-            f"jobsdb_after_cover_{self._safe_name(job)}.png",
-        )
-        human_delay(1.5, 2.5)
+        # ── Step 3: Update Jobsdb Profile → 直接 Continue 跳过 ─────────────────────
+        for _ in range(2):
+            low = (await self.page.title() or "").lower()
+            if "review" in low or "submit" in self.page.url.lower():
+                break
+            if "profile" in self.page.url.lower() or "profile" in low:
+                if not await self._click_continue("step3-profile", job):
+                    break
+                human_delay(1.0, 1.8)
+            else:
+                break
 
-        # ── Step 4: 薪资填写 ────────────────────────────────────────────────────────
-        # TODO: 调试时确认薪资输入框的实际选择器和单位
-        salary_input = await self.page.query_selector(
-            "input[data-automation='salary-input'], "
-            "input[name*='salary' i], "
-            "input[placeholder*='salary' i], "
-            "input[type='number'][name*='expect' i], "
-            "input[aria-label*='salary' i]"
-        )
-        if salary_input and await salary_input.is_visible():
-            await salary_input.click()
-            human_delay(0.3, 0.7)
-            await salary_input.triple_click()  # 清除原有内容
-            await salary_input.type(str(salary_to_fill), delay=random.randint(50, 120))
-            human_delay(0.5, 1.0)
-            print(f"  ✅ 已填入薪资: {salary_to_fill}", flush=True)
-        else:
-            # 申请表单尚未摸清，前台人工处理：暂停等用户填薪资（前台运行才有效）
-            print(f"  ⚠️ 未找到薪资输入框，请在浏览器手动填入 {salary_to_fill} 后回到终端", flush=True)
-            await screenshot_page(self.page, f"jobsdb_salary_manual_{self._safe_name(job)}.png")
-            input("  已手动填入薪资？按 Enter 继续... ")
-
-        # ── Step 5: 其他问题（因职位而异）────────────────────────────────────────────
-        # TODO: 可能有 "Are you eligible to work in HK?" 等问题
-        # 当前策略：截图后暂停让用户处理，或自动回答常见题
-        # 常见问题自动处理：
-        await self._handle_additional_questions(job)
-
-        await self._click_smart(
-            self.page,
-            ["button:has-text('Continue')", "button:has-text('Next')",
-             "[data-automation='continue-button']"],
-            "找到 Continue 或 Next 按钮，进入薪资后的下一步。",
-            f"jobsdb_after_salary_{self._safe_name(job)}.png",
-        )
-        human_delay(1.5, 2.5)
-
-        # ── Step 6: 最终提交 ────────────────────────────────────────────────────────
+        # ── Step 4: Review and submit ─────────────────────────────────────────────
+        human_delay(1.0, 1.8)
         await screenshot_page(self.page, f"jobsdb_before_submit_{self._safe_name(job)}.png")
-        submitted = await self._click_smart(
-            self.page,
-            [
-                "button:has-text('Submit application')",
-                "button:has-text('Send application')",
-                "button:has-text('Submit')",
-                "button:has-text('Apply')",
-                "[data-automation='submit-button']",
-                "[data-automation='send-application']",
-            ],
-            "找到最终提交申请的按钮（Submit application / Send application），点击它完成申请。",
-            f"jobsdb_submit_{self._safe_name(job)}.png",
-        )
+        submitted = False
+        for sel in [
+            "button:has-text('Submit application')",
+            "[data-automation='review-submit-application']",
+            "button:has-text('Submit')",
+        ]:
+            try:
+                el = await self.page.query_selector(sel)
+                if el and await el.is_visible():
+                    await el.click()
+                    submitted = True
+                    print("  \U0001f4e8 已点击 Submit application", flush=True)
+                    break
+            except Exception:
+                continue
         if not submitted:
-            print("  ⚠️ [TODO] 未找到提交按钮，请手动提交后按 Enter 继续...", flush=True)
-            input("  已手动提交？按 Enter 继续... ")
+            print("  ⚠️ 未找到 Submit application 按钮", flush=True)
+            await screenshot_page(self.page, f"jobsdb_no_submit_{self._safe_name(job)}.png")
+            return False
+
         human_delay(APPLY_DELAY_MIN, APPLY_DELAY_MAX)
         await screenshot_page(self.page, f"jobsdb_after_submit_{self._safe_name(job)}.png")
 
-        # 确认是否提交成功（页面出现 "Application submitted" 字样）
+        # 确认提交成功
         try:
-            content = await self.page.content()
-            if any(kw in content.lower() for kw in
-                   ["application submitted", "successfully applied", "your application"]):
+            content = (await self.page.content()).lower()
+            if any(kw in content for kw in
+                   ["application submitted", "successfully applied", "your application has been",
+                    "application sent", "you've applied"]):
                 print("  ✅ 页面确认申请提交成功", flush=True)
+                return True
+            if "/apply/success" in self.page.url.lower() or "submitted" in self.page.url.lower():
+                print("  ✅ URL 确认申请提交成功", flush=True)
                 return True
         except Exception:
             pass
+        # 未明确确认，但已点提交：视为成功（截图留证）
+        return True
 
-        return submitted
-
-    async def _handle_additional_questions(self, job: dict):
-        """
-        处理申请表单中的额外问题（因职位不同而异）。
-        当前策略：
-          - 尝试自动回答已知常见题
-          - 遇到不确定的题目，截图 + input() 暂停让用户处理
-
-        TODO: 调试时补充常见问题的自动处理逻辑，例如：
-          - "Are you eligible to work in Hong Kong?" → Yes
-          - "How many years of experience do you have?" → 需配置
-          - "Expected start date" → 近期日期
-        """
-        # 通用"Yes/是"类问题自动回答
-        for label_text in ["Yes", "I am eligible", "Currently residing"]:
+    async def _click_continue(self, tag: str, job: dict) -> bool:
+        """点击当前步骤的 Continue 按钮（JobsDB 申请流程每步推进按钮）。"""
+        for sel in [
+            "button:has-text('Continue')",
+            "[data-automation='continue-button']",
+            "button:has-text('Next')",
+        ]:
             try:
-                el = await self.page.query_selector(f"label:has-text('{label_text}')")
-                if el and await el.is_visible():
+                el = await self.page.query_selector(sel)
+                if el and await el.is_visible() and await el.is_enabled():
                     await el.click()
-                    human_delay(0.3, 0.7)
+                    human_delay(0.8, 1.4)
+                    return True
             except Exception:
-                pass
+                continue
+        return False
 
-        # 截图记录当前表单状态（调试时有用）
-        await screenshot_page(self.page, f"jobsdb_extra_questions_{self._safe_name(job)}.png")
+    async def _answer_employer_questions(self, job: dict, salary_to_fill: int):
+        """
+        规则化回答 JobsDB apply 第2步的动态雇主问题。
 
+        ⚠️ 雇主问题不固定：发布人从一个很长的固定问题库里勾选，不同职位是不同子集，
+        每次都可能遇到新问题。因此本方法：
+          1. 用"题型规则"识别（而非写死题名），能泛化到没见过的新题
+          2. 把每个遇到过的问题持久化到 jobsdb_questions.json（catalog），不删旧题
+          3. 规则无法自信回答的题，标记 answered=False 入 catalog，待补规则
+
+        题型与策略：
+          - 经验类下拉（含 'More than 5 years'）→ 选最大（EXPERIENCE_PICK_MAX）
+          - 期望薪资下拉（$5K..$120K）→ 选 >= 期望月薪的最接近档
+          - 其他下拉 → 选最后一个非空选项
+          - HK 工作权利 radio → 匹配 RIGHT_TO_WORK_HK（TTPS）
+          - Yes/No radio → 正向问题选 Yes
+          - 编程语言 checkbox → 勾选 CANDIDATE_LANGUAGES 命中项
+          - 语言熟练度 checkbox（Writes/Speaks/Limited）→ 勾 Writes+Speaks proficiently
+          - 其他 checkbox → 勾第一个非"None"项
+        """
+        controls = await self.page.evaluate(r"""() => {
+            function qtext(inp){
+                let fs=inp.closest('fieldset'); if(fs){const lg=fs.querySelector('legend'); if(lg)return lg.textContent.trim();}
+                let cur=inp.parentElement;
+                for(let i=0;i<6&&cur;i++){
+                    const strong=cur.querySelector(':scope > strong, :scope > label, :scope > div > strong');
+                    if(strong&&strong.textContent.trim().length>5)return strong.textContent.trim().slice(0,160);
+                    cur=cur.parentElement;
+                }
+                return '';
+            }
+            function labelFor(inp){
+                if(inp.id){const l=document.querySelector(`label[for="${CSS.escape(inp.id)}"]`); if(l)return l.textContent.trim();}
+                const l2=inp.closest('label'); if(l2)return l2.textContent.trim();
+                return inp.getAttribute('aria-label')||'';
+            }
+            const seen=new Set(), out=[];
+            for(const el of document.querySelectorAll("select, input[type=radio], input[type=checkbox]")){
+                if(el.tagName==='SELECT'){
+                    out.push({name:el.name,kind:'select',q:qtext(el),
+                        options:[...el.options].map(o=>({v:o.value,t:o.textContent.trim()}))});
+                } else {
+                    if(seen.has(el.name))continue; seen.add(el.name);
+                    const group=[...document.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`)];
+                    out.push({name:el.name,kind:el.type,q:qtext(el),
+                        options:group.map((g,i)=>({i:i,label:labelFor(g)}))});
+                }
+            }
+            return out;
+        }""")
+
+        def opt_texts(opts):
+            return [o.get("t") or o.get("label") or "" for o in opts]
+
+        for ctl in controls:
+            name = ctl["name"]
+            kind = ctl["kind"]
+            opts = ctl["options"]
+            q = (ctl.get("q") or "").strip()
+            texts = opt_texts(opts)
+            joined = " | ".join(texts).lower()
+            answered = False
+            chosen_desc = ""
+            try:
+                if kind == "select":
+                    real = [o for o in opts if (o.get("v") or "").strip() and (o.get("t") or "").strip()]
+                    if not real:
+                        self._record_question(name, kind, q, texts, False, "无可选项")
+                        continue
+                    is_exp = any("more than 5 years" in (o.get("t") or "").lower() for o in opts)
+                    is_salary = any(re.match(r"\$\d", (o.get("t") or "").strip()) for o in opts)
+                    if is_exp and EXPERIENCE_PICK_MAX:
+                        target = real[-1]
+                        label = "经验→最大"
+                    elif is_salary:
+                        target = self._pick_salary_option(real, salary_to_fill)
+                        label = "薪资档"
+                    else:
+                        target = real[-1]
+                        label = "默认末项"
+                    await self.page.select_option(f"select[name='{name}']", value=target["v"])
+                    chosen_desc = target.get("t")
+                    answered = True
+                    print(f"  ✅ [{label}] {q[:40] or name[-12:]} → {chosen_desc}", flush=True)
+                    human_delay(0.3, 0.6)
+
+                elif kind == "radio":
+                    pick_idx = None
+                    rule = "兜底首项"
+                    if "right to work" in q.lower() or "right to work" in joined:
+                        for o in opts:
+                            if RIGHT_TO_WORK_HK.lower() in (o.get("label") or "").lower():
+                                pick_idx = o["i"]; rule = "HK工作权利"; break
+                    if pick_idx is None and ("yes" in joined and "no" in joined):
+                        for o in opts:
+                            if (o.get("label") or "").strip().lower() == "yes":
+                                pick_idx = o["i"]; rule = "Yes/No→Yes"; break
+                    if pick_idx is None:
+                        pick_idx = opts[0]["i"]
+                    radios = await self.page.query_selector_all(f"input[name='{name}']")
+                    if pick_idx < len(radios):
+                        await radios[pick_idx].check()
+                        chosen_desc = next((o.get("label") for o in opts if o["i"] == pick_idx), "?")
+                        answered = (rule != "兜底首项")
+                        print(f"  ✅ [单选/{rule}] {q[:40] or name[-12:]} → {chosen_desc}", flush=True)
+                        human_delay(0.3, 0.6)
+
+                elif kind == "checkbox":
+                    boxes = await self.page.query_selector_all(f"input[name='{name}']")
+                    picked = []
+                    is_lang_prof = "proficien" in joined
+                    is_prog = any(t.lower() in ("python", "java", "javascript", "c++", "c#")
+                                  for t in texts)
+                    for o in opts:
+                        lab = (o.get("label") or "").lower()
+                        want = False
+                        if is_lang_prof:
+                            want = "proficiently" in lab
+                        elif is_prog:
+                            # 精确匹配选项文本，避免 "c" 命中 CSS/Scala/Objective-C
+                            want = lab.strip() in [cl.strip() for cl in CANDIDATE_LANGUAGES]
+                        if want and o["i"] < len(boxes):
+                            await boxes[o["i"]].check()
+                            picked.append(o.get("label"))
+                            human_delay(0.2, 0.4)
+                    if not picked and boxes:
+                        for o in opts:
+                            if "none" not in (o.get("label") or "").lower() and o["i"] < len(boxes):
+                                await boxes[o["i"]].check()
+                                picked.append(o.get("label")); break
+                    answered = bool(picked) and (is_lang_prof or is_prog)
+                    chosen_desc = ", ".join(picked)
+                    if picked:
+                        print(f"  ✅ [多选] {q[:40] or name[-12:]} → {chosen_desc}", flush=True)
+                self._record_question(name, kind, q, texts, answered, chosen_desc)
+            except Exception as e:
+                print(f"  [WARN] 答题失败 {name}: {e}", flush=True)
+                self._record_question(name, kind, q, texts, False, f"异常:{e}")
+
+        await screenshot_page(self.page, f"jobsdb_questions_{self._safe_name(job)}.png")
+
+    def _record_question(self, name, kind, q, options, answered, chosen):
+        """持久化遇到过的雇主问题到 catalog（不删旧题；标记未自信回答的待补规则）。"""
+        try:
+            cat = {}
+            if QUESTIONS_CATALOG_FILE.exists():
+                cat = json.loads(QUESTIONS_CATALOG_FILE.read_text(encoding="utf-8"))
+            entry = cat.get(name, {})
+            entry["kind"] = kind
+            if q:
+                entry["question"] = q
+            # 合并选项（保留历史出现过的所有选项）
+            old_opts = set(entry.get("options", []))
+            entry["options"] = sorted(old_opts | set([o for o in options if o]))
+            entry["seen_count"] = entry.get("seen_count", 0) + 1
+            entry["last_answered"] = answered
+            entry["last_chosen"] = chosen
+            if not answered:
+                entry["needs_rule"] = True  # 标记：规则未自信回答，待补
+            cat[name] = entry
+            QUESTIONS_CATALOG_FILE.write_text(
+                json.dumps(cat, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            print(f"  [WARN] 记录问题 catalog 失败: {e}", flush=True)
+
+    def _pick_salary_option(self, real_opts: list, salary_to_fill: int) -> dict:
+        """从薪资下拉（$5K..$120K or more）中选 >= 期望月薪的最接近档；无则选最高。"""
+        want_k = max(1, round(salary_to_fill / 1000))
+        best = None
+        best_k = None
+        for o in real_opts:
+            m = re.search(r"\$(\d+)", o.get("t") or "")
+            if not m:
+                continue
+            k = int(m.group(1))
+            if k >= want_k and (best_k is None or k < best_k):
+                best, best_k = o, k
+        return best or real_opts[-1]
     def _safe_name(self, job: dict) -> str:
         """生成文件名安全的职位标识符"""
         company = job.get("company", "unknown")
@@ -1234,16 +1405,16 @@ class JobsDBAutomator:
             self._print_progress(stat)
             return "would_apply"
 
-        # 检查 Apply 按钮（若无，跳过）
-        # 回到职位卡片所在页面（若刚刚打开了详情页）
-        # TODO: 调试时确认：打开详情页后是否需要 go_back() 才能点卡片上的 Apply
+        # 检查 Apply 按钮（此时已在详情页——get_job_description 已导航到 detail_url）
+        # 实测确认：详情页申请按钮为 a[data-automation='job-detail-apply']
+        #   - 文字 "Quick apply" → JobsDB 原生表单（可自动投递）
+        #   - 文字 "Apply"       → 跳第三方网站投递（主人指示：跳过）
         apply_btn = None
         for sel in [
-            "button:has-text('Apply now')",
+            "a[data-automation='job-detail-apply']",
+            "[data-automation='job-detail-apply']",
             "button:has-text('Quick apply')",
-            "button:has-text('Apply')",
-            "[data-automation='apply-button']",
-            "a:has-text('Apply now')",
+            "a:has-text('Quick apply')",
         ]:
             try:
                 el = await self.page.query_selector(sel)
@@ -1258,6 +1429,18 @@ class JobsDBAutomator:
             stat["no_apply_btn"] = stat.get("no_apply_btn", 0) + 1
             self._print_progress(stat)
             return "no_apply_btn"
+
+        # 第三方投递识别：按钮文字非 "Quick apply"（如 "Apply"）→ 跳第三方，跳过
+        try:
+            btn_text = ((await apply_btn.text_content()) or "").strip().lower()
+        except Exception:
+            btn_text = ""
+        if btn_text and "quick apply" not in btn_text:
+            print(f"  ⏭️  [跳过-第三方投递] 申请按钮为 '{btn_text}'（非 Quick apply）", flush=True)
+            record_job(self.applied_data, company, title, "skipped_external", source, salary_text)
+            stat["reject"] += 1
+            self._print_progress(stat)
+            return "external"
 
         # 点 Apply
         try:

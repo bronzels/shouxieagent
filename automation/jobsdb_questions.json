@@ -1,0 +1,143 @@
+{
+  "questionnaire.HK_Q_238BBA7D8742773C0B81C44A2D4753F4_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_3217_V_3": {
+    "kind": "radio",
+    "question": "Which of the following statements best describes your right to work in Hong Kong?",
+    "options": [
+      "I am a Hong Kong SAR citizen",
+      "I am a Hong Kong SAR permanent resident",
+      "I have a temporary visa (eg. QMAS, TTPS, IANG)",
+      "I have a temporary visa with restrictions on industry (eg. TechTAS)",
+      "I require sponsorship to work for a new employer (e.g. GEP - Professionals or Employment as Imported Workers visa)"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "I have a temporary visa (eg. QMAS, TTPS, IANG)"
+  },
+  "questionnaire.HK_Q_2648_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_3292_V_1": {
+    "kind": "select",
+    "options": [
+      "$100K",
+      "$10K",
+      "$11K",
+      "$120K or more",
+      "$12K",
+      "$13K",
+      "$14K",
+      "$15K",
+      "$16K",
+      "$17K",
+      "$18K",
+      "$19K",
+      "$20K",
+      "$25K",
+      "$30K",
+      "$35K",
+      "$40K",
+      "$50K",
+      "$5K",
+      "$60K",
+      "$6K",
+      "$7K",
+      "$80K",
+      "$8K",
+      "$9K"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "$40K"
+  },
+  "questionnaire.HK_Q_2C5D4832186B8B9CBBF377131AEB5840_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_3034_V_1": {
+    "kind": "checkbox",
+    "options": [
+      ".NET",
+      "C",
+      "C#",
+      "C++",
+      "CSS",
+      "HTML",
+      "Java",
+      "JavaScript",
+      "None of these",
+      "Objective-C",
+      "PHP",
+      "Python",
+      "Ruby",
+      "Scala",
+      "Swift",
+      "Visual Basic"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "JavaScript, CSS, Java, C, C#, Python, C++, Objective-C, Scala, Visual Basic"
+  },
+  "questionnaire.HK_Q_3131_V_1": {
+    "kind": "radio",
+    "question": "Have you worked in a role which requires experience with machine learning techniques?",
+    "options": [
+      "No",
+      "Yes"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "Yes"
+  },
+  "questionnaire.HK_Q_3222_V_1": {
+    "kind": "checkbox",
+    "options": [
+      "Limited proficiency",
+      "Speaks proficiently in a professional setting",
+      "Writes proficiently in a professional setting"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "Writes proficiently in a professional setting, Speaks proficiently in a professional setting"
+  }
+}
