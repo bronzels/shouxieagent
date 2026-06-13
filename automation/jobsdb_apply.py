@@ -85,13 +85,13 @@ REPORTS_DIR.mkdir(exist_ok=True)
 # 正文太短时视为抓取失败的阈值（英文 JD 字符更少，适当降低）
 MIN_DESC_LEN = 60
 
-# 人类操作延迟
-DELAY_MIN = 0.8
-DELAY_MAX = 1.8
-CARD_DELAY_MIN = 1.2
-CARD_DELAY_MAX = 2.2
-APPLY_DELAY_MIN = 3.0
-APPLY_DELAY_MAX = 5.0
+# 人类操作延迟（已调低加速：只读遍历/判断，用真实Chrome已过Cloudflare，风险低）
+DELAY_MIN = 0.3
+DELAY_MAX = 0.7
+CARD_DELAY_MIN = 0.5
+CARD_DELAY_MAX = 1.0
+APPLY_DELAY_MIN = 2.5   # 真实申请动作保持稍稳
+APPLY_DELAY_MAX = 4.0
 
 
 # ─── 工具函数 ─────────────────────────────────────────────────────────────────────
@@ -947,12 +947,12 @@ class JobsDBAutomator:
         # TODO: 调试时确认详情页 JD 正文选择器
         try:
             await self.page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
-            # 详情页 SPA 渲染较慢：等 JD 正文容器出现再读（实测正文容器为 jobAdDetails）
+            # 详情页 SPA：等 JD 容器出现即读（缩短超时与固定延迟，加速）
             try:
-                await self.page.wait_for_selector("[data-automation='jobAdDetails']", timeout=15000)
+                await self.page.wait_for_selector("[data-automation='jobAdDetails']", timeout=8000)
             except Exception:
                 pass
-            human_delay(1.5, 2.5)
+            human_delay(0.4, 0.9)
             for sel in [
                 "[data-automation='jobAdDetails']",   # 实测确认的 JD 正文容器
                 "[data-automation='jobDescription']",
@@ -1040,10 +1040,8 @@ class JobsDBAutomator:
             f"jobsdb_cover_letter_{self._safe_name(job)}.png",
         )
         if not cover_letter_no:
-            # 如果界面复杂，暂停请用户确认
-            # TODO: 调试阶段这里可能需要频繁手动介入
-            print("  ⚠️ [TODO] 未能自动选择 No cover letter，"
-                  "请手动选择后按 Enter 继续...", flush=True)
+            # 申请表单尚未摸清，必须前台人工处理：暂停等用户在浏览器操作（前台运行才有效）
+            print("  ⚠️ 未能自动选择 No cover letter，请在浏览器手动处理后回到终端", flush=True)
             await screenshot_page(self.page, f"jobsdb_cover_letter_manual_{self._safe_name(job)}.png")
             user_action = input("  已手动处理 cover letter？输入 'ok' 继续 / 'skip' 跳过此职位: ").strip().lower()
             if user_action != "ok":
@@ -1077,9 +1075,8 @@ class JobsDBAutomator:
             human_delay(0.5, 1.0)
             print(f"  ✅ 已填入薪资: {salary_to_fill}", flush=True)
         else:
-            # TODO: 薪资字段可能出现在不同步骤，或有单位下拉框
-            print(f"  ⚠️ [TODO] 未找到薪资输入框，请手动填入 {salary_to_fill} 后按 Enter 继续...",
-                  flush=True)
+            # 申请表单尚未摸清，前台人工处理：暂停等用户填薪资（前台运行才有效）
+            print(f"  ⚠️ 未找到薪资输入框，请在浏览器手动填入 {salary_to_fill} 后回到终端", flush=True)
             await screenshot_page(self.page, f"jobsdb_salary_manual_{self._safe_name(job)}.png")
             input("  已手动填入薪资？按 Enter 继续... ")
 
