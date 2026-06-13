@@ -117,18 +117,29 @@ CARD_DELAY_MAX = 0.9
 APPLY_DELAY_MIN = 1.5    # 投递动作（立即沟通后，已调快但仍留余量）
 APPLY_DELAY_MAX = 2.5
 
+# 城市/tab 完成标记的有效期（小时）：完成后 N 小时内重跑跳过，超过则重新处理
+CITY_RECHECK_HOURS = 24
+
 # ─── 工具函数 ─────────────────────────────────────────────────────────────────
 
 def load_applied_jobs() -> dict:
-    """加载已投递职位记录（含已完成城市列表，用于双重去重）"""
+    """加载已投递职位记录（含已完成城市记录，用于双重去重）
+
+    completed_cities 现为 dict：{城市名: "YYYY-MM-DD HH:MM:SS"}，记录完成时间，
+    超过 CITY_RECHECK_HOURS 小时后允许重跑。兼容旧版 list[str] 格式（自动转换，
+    无时间戳的旧城市视为已过期、可重跑）。
+    """
     if APPLIED_JOBS_FILE.exists():
         with open(APPLIED_JOBS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             data.setdefault("jobs", [])
-            data.setdefault("completed_cities", [])
+            data.setdefault("completed_cities", {})
             data.setdefault("last_updated", "")
+            # 兼容旧版 list 格式 → 转 dict（无时间戳=空串，视为过期可重跑）
+            if isinstance(data["completed_cities"], list):
+                data["completed_cities"] = {c: "" for c in data["completed_cities"]}
             return data
-    return {"jobs": [], "completed_cities": [], "last_updated": ""}
+    return {"jobs": [], "completed_cities": {}, "last_updated": ""}
 
 
 def save_applied_jobs(data: dict):
@@ -160,16 +171,35 @@ def record_application(data: dict, company: str, position: str, city: str):
 
 
 def is_city_completed(data: dict, city: str) -> bool:
-    """该城市是否已在之前的运行中处理完成"""
-    return city in data.get("completed_cities", [])
+    """该城市是否在 CITY_RECHECK_HOURS 小时内已处理完成（是→跳过；超期→可重跑）"""
+    cities = data.get("completed_cities", {})
+    if isinstance(cities, list):  # 兼容旧格式
+        cities = {c: "" for c in cities}
+    ts = cities.get(city)
+    if not ts:  # 未记录或无时间戳（旧数据）→ 不跳过，可重跑
+        return False
+    try:
+        done_at = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return False
+    age_hours = (datetime.now() - done_at).total_seconds() / 3600
+    if age_hours < CITY_RECHECK_HOURS:
+        print(f"  ⏭️ 城市 [{city}] 于 {ts} 处理完成（{age_hours:.1f}h 前 < {CITY_RECHECK_HOURS}h），跳过")
+        return True
+    print(f"  🔄 城市 [{city}] 上次完成于 {ts}（{age_hours:.1f}h 前 ≥ {CITY_RECHECK_HOURS}h），重新处理")
+    return False
 
 
 def mark_city_completed(data: dict, city: str):
-    """标记城市处理完成，下次运行跳过"""
-    if city not in data["completed_cities"]:
-        data["completed_cities"].append(city)
-        save_applied_jobs(data)
-        print(f"  🏁 城市 [{city}] 处理完成，已记录（下次运行将跳过）")
+    """标记城市处理完成（记录当前时间戳），CITY_RECHECK_HOURS 小时内的重跑会跳过"""
+    cities = data.get("completed_cities", {})
+    if isinstance(cities, list):  # 兼容旧格式
+        cities = {c: "" for c in cities}
+        data["completed_cities"] = cities
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cities[city] = now
+    save_applied_jobs(data)
+    print(f"  🏁 城市 [{city}] 处理完成，已记录时间 {now}（{CITY_RECHECK_HOURS}h 内重跑将跳过）")
 
 
 def export_applications_csv(data: dict) -> str:
@@ -191,7 +221,7 @@ def export_applications_csv(data: dict) -> str:
         w.writerow([f"搜索内容：{SEARCH_KEYWORD}",
                     f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                     f"投递总数：{len(data.get('jobs', []))}",
-                    f"完成城市：{'/'.join(data.get('completed_cities', []))}"])
+                    f"完成城市：{'/'.join(data.get('completed_cities', {}))}"])
         w.writerow(["序号", "公司", "职位", "城市", "投递时间"])
         for i, j in enumerate(data.get("jobs", []), 1):
             w.writerow([i, j.get("company", ""), j.get("position", ""),
@@ -1322,7 +1352,7 @@ class BossZhipinAutomator:
                 print("\n" + "="*60)
                 print("✅ 投递完成！")
                 print(f"📊 累计投递 {len(self.applied_data['jobs'])} 个职位")
-                print(f"🏙️ 已完成城市: {', '.join(self.applied_data.get('completed_cities', [])) or '无'}")
+                print(f"🏙️ 已完成城市: {', '.join(self.applied_data.get('completed_cities', {})) or '无'}")
                 print(f"📁 记录已保存至: {APPLIED_JOBS_FILE}")
                 print("="*60)
 
