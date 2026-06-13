@@ -305,7 +305,7 @@ class LlmSzAutomator(BossZhipinAutomator):
 
                 # 城市级去重
                 if is_city_completed(self.applied_data, f"{self.city}-大模型"):
-                    print(f"深圳大模型任务在 CITY_RECHECK_HOURS 小时内已完成，跳过（超期会自动重跑）")
+                    print(f"深圳大模型任务今天已完成，跳过（隔天会自动重跑）")
                     return
 
                 stat = {"checked": 0, "applied": 0, "reject": 0,

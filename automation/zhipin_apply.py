@@ -117,17 +117,16 @@ CARD_DELAY_MAX = 0.9
 APPLY_DELAY_MIN = 1.5    # 投递动作（立即沟通后，已调快但仍留余量）
 APPLY_DELAY_MAX = 2.5
 
-# 城市/tab 完成标记的有效期（小时）：完成后 N 小时内重跑跳过，超过则重新处理
-CITY_RECHECK_HOURS = 24
+# 城市完成标记按【日历日期】判断：同一天重跑跳过，不同日期（隔天）则重新处理
 
 # ─── 工具函数 ─────────────────────────────────────────────────────────────────
 
 def load_applied_jobs() -> dict:
     """加载已投递职位记录（含已完成城市记录，用于双重去重）
 
-    completed_cities 现为 dict：{城市名: "YYYY-MM-DD HH:MM:SS"}，记录完成时间，
-    超过 CITY_RECHECK_HOURS 小时后允许重跑。兼容旧版 list[str] 格式（自动转换，
-    无时间戳的旧城市视为已过期、可重跑）。
+    completed_cities 现为 dict：{城市名: "YYYY-MM-DD HH:MM:SS"}，记录完成日期时间，
+    按日历日期判断：同一天重跑跳过，隔天（不同日期）则重新处理。兼容旧版 list[str]
+    格式（自动转换，无时间戳的旧城市视为可重跑）。
     """
     if APPLIED_JOBS_FILE.exists():
         with open(APPLIED_JOBS_FILE, "r", encoding="utf-8") as f:
@@ -171,27 +170,28 @@ def record_application(data: dict, company: str, position: str, city: str):
 
 
 def is_city_completed(data: dict, city: str) -> bool:
-    """该城市是否在 CITY_RECHECK_HOURS 小时内已处理完成（是→跳过；超期→可重跑）"""
+    """该城市是否【在今天】已处理完成（同一天→跳过；不同日期→可重跑）
+
+    按日历日期判断，不看间隔小时数：同一天重复运行会跳过（避免当天重复打招呼），
+    只要不是今天完成的（哪怕只跨过一次午夜）就重新处理。
+    """
     cities = data.get("completed_cities", {})
     if isinstance(cities, list):  # 兼容旧格式
         cities = {c: "" for c in cities}
     ts = cities.get(city)
     if not ts:  # 未记录或无时间戳（旧数据）→ 不跳过，可重跑
         return False
-    try:
-        done_at = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-    except (ValueError, TypeError):
-        return False
-    age_hours = (datetime.now() - done_at).total_seconds() / 3600
-    if age_hours < CITY_RECHECK_HOURS:
-        print(f"  ⏭️ 城市 [{city}] 于 {ts} 处理完成（{age_hours:.1f}h 前 < {CITY_RECHECK_HOURS}h），跳过")
+    done_date = ts.split(" ")[0]  # 取 "YYYY-MM-DD" 部分
+    today = datetime.now().strftime("%Y-%m-%d")
+    if done_date == today:
+        print(f"  ⏭️ 城市 [{city}] 今天（{done_date}）已处理完成，跳过")
         return True
-    print(f"  🔄 城市 [{city}] 上次完成于 {ts}（{age_hours:.1f}h 前 ≥ {CITY_RECHECK_HOURS}h），重新处理")
+    print(f"  🔄 城市 [{city}] 上次完成于 {done_date}（非今天 {today}），重新处理")
     return False
 
 
 def mark_city_completed(data: dict, city: str):
-    """标记城市处理完成（记录当前时间戳），CITY_RECHECK_HOURS 小时内的重跑会跳过"""
+    """标记城市处理完成（记录当前日期时间），当天重跑会跳过，隔天则重新处理"""
     cities = data.get("completed_cities", {})
     if isinstance(cities, list):  # 兼容旧格式
         cities = {c: "" for c in cities}
@@ -199,7 +199,7 @@ def mark_city_completed(data: dict, city: str):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cities[city] = now
     save_applied_jobs(data)
-    print(f"  🏁 城市 [{city}] 处理完成，已记录时间 {now}（{CITY_RECHECK_HOURS}h 内重跑将跳过）")
+    print(f"  🏁 城市 [{city}] 处理完成，已记录 {now}（当天重跑将跳过，隔天可重跑）")
 
 
 def export_applications_csv(data: dict) -> str:
