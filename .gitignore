@@ -13,5 +13,8 @@ automation/videos/
 **/*.webm
 **/*.png
 **/*.jpg
-**/*.jpegautomation/jobsdb_profile/
+**/*.jpeg
+automation/jobsdb_profile/
 automation/chrome_profile/
+automation/_new_methods.txt
+automation/_*.py
