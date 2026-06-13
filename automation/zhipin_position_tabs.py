@@ -313,19 +313,12 @@ class PositionTabsAutomator(BossZhipinAutomator):
 
     async def scroll_to_load_more(self) -> int:
         """
-        在 tab 内滚动到底部以加载更多职位（如果是无限滚动而非分页）。
-        返回滚动后的职位总数。
-
-        TODO-SELECTOR: 需确认职位 tab 列表是分页还是无限滚动。
-        - 如果是分页：需要找「下一页」按钮并点击（参考 goto_list 方式）。
-        - 如果是无限滚动：滚动到底部即可加载更多。
-        当前实现按无限滚动处理（滚动3次）。
+        在 tab 内滚动到底部以加载更多职位。
+        实测 Boss直聘职位列表为【无限滚动懒加载】：goto/切 tab 后只渲染首屏约 15 个，
+        需持续下滚才会陆续加载（约 15 次滚动可达 120 个）。早先"只滚 3 次"远不够，
+        会漏掉本 tab 大部分职位。现复用父类 _scroll_load_all_cards 滚动到底加载全部。
         """
-        for _ in range(3):
-            await self.page.mouse.wheel(0, 800)
-            human_delay(1.5, 2.5)
-        n = len(await self.page.query_selector_all(".job-card-box"))
-        return n
+        return await self._scroll_load_all_cards()
 
     async def process_tab(self, tab_name: str) -> dict:
         """
@@ -346,10 +339,8 @@ class PositionTabsAutomator(BossZhipinAutomator):
             print(f"  [WARN] tab【{tab_name}】点击失败，跳过本 tab")
             return stat
 
-        # 加载职位列表（滚动或等待）
-        await self.scroll_to_load_more()
-
-        # 获取职位列表（复用 get_job_listings）
+        # 获取职位列表（get_job_listings 已内置滚动懒加载到底，加载本 tab 全部职位，
+        # 无需再单独调 scroll_to_load_more）
         jobs = await self.get_job_listings()
         if not jobs:
             print(f"  tab【{tab_name}】无职位，跳过")

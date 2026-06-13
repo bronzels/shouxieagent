@@ -845,10 +845,51 @@ class BossZhipinAutomator:
                 print(f"  [WARN] 列表导航失败(尝试{attempt+1}): {e}")
         return False
 
+    async def _scroll_load_all_cards(self, max_scrolls: int = 40,
+                                     stable_rounds: int = 3) -> int:
+        """
+        Boss直聘新版搜索/列表页是【无限滚动懒加载】，URL 的 &page=N 参数实测无效
+        （page=1/2/3 返回同一批职位）。goto 后页面只渲染首屏约 15 个 .job-card-box，
+        必须持续向下滚动，新职位卡才会被陆续插入 DOM。
+
+        本方法滚动到底：每次下滚一屏并等待，直到连续 stable_rounds 次卡片数不再增长
+        （判定已加载完本次搜索的全部职位），或达到 max_scrolls 上限。
+        返回滚动后页面上的 .job-card-box 总数。
+
+        实测（query=远程 软件, city=深圳）：首屏 15 → 滚到底约 120，漏抓时丢失约 87%。
+        """
+        last = len(await self.page.query_selector_all(".job-card-box"))
+        stable = 0
+        for _ in range(max_scrolls):
+            await self.page.mouse.wheel(0, 1400)
+            human_delay(0.9, 1.6)
+            n = len(await self.page.query_selector_all(".job-card-box"))
+            if n <= last:
+                stable += 1
+                if stable >= stable_rounds:
+                    break
+            else:
+                stable = 0
+            last = n
+        # 回到列表顶部，保证后续逐卡 click/scroll_into_view 从头开始、坐标稳定
+        try:
+            await self.page.mouse.wheel(0, -100000)
+            human_delay(0.5, 1.0)
+        except Exception:
+            pass
+        print(f"  📜 滚动懒加载完成：本页共 {last} 个职位卡（首屏仅约15，滚动后加载全部）")
+        return last
+
     async def get_job_listings(self) -> list[dict]:
-        """提取当前搜索结果页的职位列表（选择器经实测：.job-card-box）"""
+        """提取当前搜索结果页的职位列表（选择器经实测：.job-card-box）。
+
+        ⚠️ 必须先滚动懒加载到底再抓取——新版列表页 goto 后只渲染首屏~15 个卡片，
+        不滚动会漏掉本次搜索 80%+ 的职位（用户反馈"符合条件的职位没投递"的根因）。
+        """
         jobs = []
         try:
+            # 关键修复：先滚动到底把全部懒加载职位卡加载进 DOM，再统一抓取
+            await self._scroll_load_all_cards()
             job_cards = await self.page.query_selector_all(".job-card-box")
 
             for card in job_cards:
@@ -1161,44 +1202,37 @@ class BossZhipinAutomator:
         stat = {"city": city, "checked": 0, "applied": 0, "reject": 0,
                 "dup": 0, "contacted": 0, "fail": 0, "blocked": 0, "skipped": False}
 
-        # 列表页逐页投递（直接用城市码导航列表页，并读 .city-label 确认城市；
-        # 地图选城市的 switch_city_via_map 已保留但不在主流程调用——列表页
-        # 已能可靠确认城市，无需额外折腾地图页）
-        page_num = 1
+        # 导航到列表页 + 滚动懒加载抓取全部职位后逐个投递。
+        # ⚠️ 重要：Boss直聘新版列表页【无限滚动懒加载，URL &page=N 实测无效】
+        # （page=1/2/3 返回同一批职位）。早先"靠 &page 翻 5 页"的写法实际每页都拿
+        # 同一批首屏 15 个，去重后等于只处理首屏，漏掉本次搜索 80%+ 的职位。
+        # 现改为：goto 第 1 页 → get_job_listings 内部滚动到底加载全部 → 一次性处理。
         any_page_ok = False
-        while page_num <= 5:  # 每个城市最多5页
-            print(f"\n  📄 {city} 第 {page_num} 页")
-            if not await self.goto_list(city, page_num):
-                if page_num == 1:
-                    print(f"  ❌ 第1页无职位，跳过城市: {city}")
-                else:
-                    print(f"  📄 已到最后一页")
-                break
-
+        if not await self.goto_list(city, 1):
+            print(f"  ❌ 列表无职位，跳过城市: {city}")
+        else:
             any_page_ok = True
-            await screenshot_page(self.page, f"results_{city}_p{page_num}.png")
+            await screenshot_page(self.page, f"results_{city}.png")
 
+            # get_job_listings 已内置滚动懒加载到底，返回本次搜索全部职位
             jobs = await self.get_job_listings()
             if not jobs:
-                print(f"  ⚠️ 本页无职位，停止翻页")
-                break
-
-            print(f"  📋 本页找到 {len(jobs)} 个职位，逐个检查...")
-            for job in jobs:
-                status = await self.apply_to_job(job, city)
-                stat["checked"] += 1
-                if status in stat:
-                    stat[status] += 1
-                # 实时累计进度提示
-                skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
-                print(f"     ▸ [{city}] 进度：检查 {stat['checked']} | "
-                      f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")
-                if self.stop_requested:
-                    print("  🛑 当日沟通次数已用完，停止本城市处理。", flush=True)
-                    return stat
-                human_delay(DELAY_MIN, DELAY_MAX)
-
-            page_num += 1
+                print(f"  ⚠️ 滚动加载后仍无职位")
+            else:
+                print(f"  📋 共找到 {len(jobs)} 个职位（已滚动加载全部），逐个检查...")
+                for job in jobs:
+                    status = await self.apply_to_job(job, city)
+                    stat["checked"] += 1
+                    if status in stat:
+                        stat[status] += 1
+                    # 实时累计进度提示
+                    skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
+                    print(f"     ▸ [{city}] 进度：检查 {stat['checked']}/{len(jobs)} | "
+                          f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")
+                    if self.stop_requested:
+                        print("  🛑 当日沟通次数已用完，停止本城市处理。", flush=True)
+                        return stat
+                    human_delay(DELAY_MIN, DELAY_MAX)
 
         # 步骤3：标记城市完成（城市级去重）
         if any_page_ok:

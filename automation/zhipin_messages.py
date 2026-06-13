@@ -471,6 +471,96 @@ class ZhipinMessageScanner:
         print("  ❌ 所有候选聊天页 URL 都未能加载出会话列表（待调试确认 URL/选择器）", flush=True)
         return False
 
+    async def scroll_load_all_conversations(self, max_scrolls: int = 40,
+                                            stable_rounds: int = 4) -> int:
+        """
+        滚动会话列表到底，确保所有会话都渲染进 DOM 后再遍历。
+
+        实测：会话列表容器为 .chat-content（overflow-y:auto）。当会话数较少（如 40）时
+        一屏放得下、全部已在 DOM；但会话很多时列表变成内部滚动，只滚窗口无效——
+        必须滚动 .chat-content 这个内部可滚动容器，懒加载/虚拟滚动的后续会话才会出现。
+        早先 run() 直接取首屏 handle 不滚动，会话多时会漏扫后面的会话（含对方索要简历的）。
+
+        策略：定位 .user-list 最近的可滚动祖先（scrollHeight>clientHeight 者，通常是
+        .chat-content），把它 scrollTop 置到底；循环直到会话数连续 stable_rounds 次不增长。
+        返回滚动后会话条数。
+        """
+        # 取当前命中的会话项选择器（与遍历时一致）
+        items = await self._get_conversation_handles()
+        if not items:
+            return 0
+        # 用首个能命中的选择器做计数
+        count_sel = None
+        for sel in SEL["conv_items"]:
+            try:
+                if await self.page.query_selector_all(sel):
+                    count_sel = sel
+                    break
+            except Exception:
+                continue
+        if not count_sel:
+            return len(items)
+
+        last = len(await self.page.query_selector_all(count_sel))
+        stable = 0
+        for _ in range(max_scrolls):
+            # 滚动 .user-list 最近的可滚动祖先到底（容器内部滚动），同时兜底滚窗口
+            await self.page.evaluate(
+                """
+                () => {
+                    const ul = document.querySelector('.user-list')
+                              || document.querySelector('.chat-user-list')
+                              || document.querySelector('[class*="conversation"]');
+                    if (ul) {
+                        let el = ul;
+                        let scrolled = false;
+                        while (el) {
+                            if (el.scrollHeight > el.clientHeight + 5) {
+                                el.scrollTop = el.scrollHeight; scrolled = true; break;
+                            }
+                            el = el.parentElement;
+                        }
+                        // 即使没找到可滚动祖先，也把列表自身与窗口滚到底兜底
+                        ul.scrollTop = ul.scrollHeight;
+                    }
+                    window.scrollTo(0, document.body.scrollHeight);
+                }
+                """
+            )
+            za.human_delay(0.8, 1.4)
+            n = len(await self.page.query_selector_all(count_sel))
+            if n <= last:
+                stable += 1
+                if stable >= stable_rounds:
+                    break
+            else:
+                stable = 0
+            last = n
+        # 滚回顶部，保证后续按 index 遍历从第一条开始
+        try:
+            await self.page.evaluate(
+                """
+                () => {
+                    const ul = document.querySelector('.user-list')
+                              || document.querySelector('.chat-user-list');
+                    if (ul) {
+                        let el = ul;
+                        while (el) {
+                            if (el.scrollHeight > el.clientHeight + 5) { el.scrollTop = 0; break; }
+                            el = el.parentElement;
+                        }
+                        ul.scrollTop = 0;
+                    }
+                    window.scrollTo(0, 0);
+                }
+                """
+            )
+            za.human_delay(0.4, 0.8)
+        except Exception:
+            pass
+        print(f"  📜 会话列表滚动加载完成：共 {last} 条会话（已滚动到底加载全部）", flush=True)
+        return last
+
     async def click_tab_all(self):
         """
         点「全部」标签，确保遍历所有会话。
@@ -842,6 +932,10 @@ class ZhipinMessageScanner:
                     return
 
                 await self.click_tab_all()
+
+                # 先滚动会话列表到底，把所有会话加载进 DOM，避免会话多时只扫到首屏、
+                # 漏掉后面的会话（含对方索要简历的）。
+                await self.scroll_load_all_conversations()
 
                 # 统计每种状态的数量
                 stat = {"unread": 0, "read_noreply": 0, "rejected": 0,

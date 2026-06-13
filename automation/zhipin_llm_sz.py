@@ -312,44 +312,33 @@ class LlmSzAutomator(BossZhipinAutomator):
                         "dup": 0, "contacted": 0, "fail": 0, "blocked": 0,
                         "would_apply": 0}
 
-                page_num = 1
+                # ⚠️ Boss直聘新版列表页【无限滚动懒加载，URL &page=N 实测无效】，
+                # 早先"翻 10 页"实际每页拿同一批首屏职位，去重后只处理首屏、漏 80%+。
+                # 现改为：goto 第 1 页 → get_job_listings 内部滚动到底加载全部 → 一次性处理。
                 any_page_ok = False
-                while page_num <= 10:  # 大模型岗位每次最多10页
-                    print(f"\n  第 {page_num} 页")
-                    if not await self.goto_list_llm(page_num):
-                        if page_num == 1:
-                            print("  第1页无职位，退出")
-                        else:
-                            print("  已到最后一页")
-                        break
-
+                if not await self.goto_list_llm(1):
+                    print("  列表无职位，退出")
+                else:
                     any_page_ok = True
-                    await screenshot_page(self.page, f"llm_sz_p{page_num}.png")
+                    await screenshot_page(self.page, "llm_sz.png")
 
-                    jobs = await self.get_job_listings()
+                    jobs = await self.get_job_listings()  # 已内置滚动懒加载到底
                     if not jobs:
-                        print("  本页无职位，停止翻页")
-                        break
-
-                    print(f"  本页 {len(jobs)} 个职位，逐个检查...")
-                    stop = False
-                    for job in jobs:
-                        status = await self.apply_to_job(job, self.city)
-                        stat["checked"] += 1
-                        if status in stat:
-                            stat[status] += 1
-                        skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
-                        print(f"     [进度] 检查 {stat['checked']} | "
-                              f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")
-                        if self.stop_requested:
-                            print("  🛑 当日沟通次数已用完，停止脚本，明天再跑。", flush=True)
-                            stop = True
-                            break
-                        human_delay(DELAY_MIN, DELAY_MAX)
-
-                    if stop:
-                        break
-                    page_num += 1
+                        print("  滚动加载后仍无职位")
+                    else:
+                        print(f"  共 {len(jobs)} 个职位（已滚动加载全部），逐个检查...")
+                        for job in jobs:
+                            status = await self.apply_to_job(job, self.city)
+                            stat["checked"] += 1
+                            if status in stat:
+                                stat[status] += 1
+                            skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
+                            print(f"     [进度] 检查 {stat['checked']}/{len(jobs)} | "
+                                  f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")
+                            if self.stop_requested:
+                                print("  🛑 当日沟通次数已用完，停止脚本，明天再跑。", flush=True)
+                                break
+                            human_delay(DELAY_MIN, DELAY_MAX)
 
                 # dry-run 不标记城市完成（未真正投递）
                 if any_page_ok and not self.dry_run:
