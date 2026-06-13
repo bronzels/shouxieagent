@@ -218,10 +218,15 @@ class LlmSzAutomator(BossZhipinAutomator):
         self.page.on("response", self._on_joblist_response)
 
     async def _on_joblist_response(self, resp):
-        """捕获 zhipin 列表 API（joblist.json）的明文 salaryDesc，按职位名建映射。"""
+        """捕获 zhipin 列表 API 明文 salaryDesc，按职位名建映射。
+
+        覆盖 search/joblist.json（搜索）与 pc/recommend/job/list.json（推荐/tab），
+        两者结构相同(zpData.jobList[])，过滤需同时匹配 joblist 和 job/list。
+        """
         try:
             url = resp.url
-            if "joblist.json" not in url and not ("zpgeek" in url and "search" in url and ".json" in url):
+            if not ("zpgeek" in url and ".json" in url
+                    and ("joblist" in url or "job/list" in url)):
                 return
             data = await resp.json()
             zp = data.get("zpData", data)

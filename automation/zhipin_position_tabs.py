@@ -153,10 +153,17 @@ class PositionTabsAutomator(BossZhipinAutomator):
         self.page.on("response", self._on_joblist_response)
 
     async def _on_joblist_response(self, resp):
-        """捕获 zhipin 列表 API（joblist.json）明文 salaryDesc，按职位名建映射。"""
+        """捕获 zhipin 列表 API 明文 salaryDesc，按职位名建映射。
+
+        ⚠️ 职位 tab（expect 推荐）列表走的是 wapi/zpgeek/pc/recommend/job/list.json，
+        搜索结果走 wapi/zpgeek/search/joblist.json，两者结构相同(zpData.jobList[])。
+        过滤需同时覆盖 joblist 和 job/list，否则 tab 模式 salary_map 永远为空、
+        薪资字体反爬无法解析、全部职位被误判薪资不达标。
+        """
         try:
             url = resp.url
-            if "joblist.json" not in url and not ("zpgeek" in url and "search" in url and ".json" in url):
+            if not ("zpgeek" in url and ".json" in url
+                    and ("joblist" in url or "job/list" in url)):
                 return
             data = await resp.json()
             zp = data.get("zpData", data)
@@ -300,15 +307,29 @@ class PositionTabsAutomator(BossZhipinAutomator):
             print(f"  [WARN] 未能点击 tab: {tab_name}")
             return False
 
+        # ⚠️ expect-item tab 是带 href 的链接，点击会【触发页面导航】到对应职位列表页。
+        # 必须先等导航/网络稳定，否则随后 get_job_listings 在导航过程中查询会报
+        # "Execution context was destroyed, most likely because of a navigation"，
+        # 上一轮就是这个原因导致每个 tab 都"无职位"。
+        try:
+            await self.page.wait_for_load_state("domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        try:
+            await self.page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
         human_delay(1.0, 1.8)
         # 等待 tab 内容加载（职位卡出现）
         try:
-            await self.page.wait_for_selector(".job-card-box", timeout=8000)
+            await self.page.wait_for_selector(".job-card-box", timeout=10000)
         except Exception:
             pass
+        # 再短暂静置，确保 SPA 列表渲染稳定后再交给 get_job_listings 滚动加载
+        human_delay(0.8, 1.5)
         await screenshot_page(self.page, f"tab_{tab_name}_loaded.png")
         n = len(await self.page.query_selector_all(".job-card-box"))
-        print(f"  tab【{tab_name}】加载完成，当前页 {n} 个职位")
+        print(f"  tab【{tab_name}】加载完成，当前页 {n} 个职位（滚动加载在 get_job_listings 内进行）")
         return True
 
     async def scroll_to_load_more(self) -> int:

@@ -875,6 +875,39 @@ class BossZhipinAutomator:
                 print(f"  [WARN] 列表导航失败(尝试{attempt+1}): {e}")
         return False
 
+    async def _settle_after_navigation(self, attempts: int = 6):
+        """等待 in-flight 导航完成、职位列表稳定，再返回。
+
+        点击 tab / 切换城市等会触发【异步导航】，导航期间任何 query 都会抛
+        "Execution context was destroyed, most likely because of a navigation"。
+        本方法反复尝试：等 load 状态 → 查询卡片数；遇到导航异常就等待后重试，
+        直到能稳定查到卡片（或用尽次数）。
+        """
+        for i in range(attempts):
+            try:
+                try:
+                    await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
+                except Exception:
+                    pass
+                try:
+                    await self.page.wait_for_load_state("networkidle", timeout=6000)
+                except Exception:
+                    pass
+                # 试查一次卡片——若正在导航这里会抛异常
+                await self.page.wait_for_selector(".job-card-box", timeout=8000)
+                _ = await self.page.query_selector_all(".job-card-box")
+                human_delay(0.5, 1.0)
+                return
+            except Exception as e:
+                msg = str(e)
+                if "context was destroyed" in msg or "navigation" in msg.lower():
+                    # 导航仍在进行，稍等再试
+                    human_delay(0.8, 1.5)
+                    continue
+                # 其它异常（如选择器超时）：再给一次机会
+                human_delay(0.5, 1.0)
+        # 用尽次数也返回，后续查询自行兜底
+
     async def _scroll_load_all_cards(self, max_scrolls: int = 40,
                                      stable_rounds: int = 3) -> int:
         """
@@ -888,12 +921,26 @@ class BossZhipinAutomator:
 
         实测（query=远程 软件, city=深圳）：首屏 15 → 滚到底约 120，漏抓时丢失约 87%。
         """
-        last = len(await self.page.query_selector_all(".job-card-box"))
+        async def _count():
+            try:
+                return len(await self.page.query_selector_all(".job-card-box"))
+            except Exception:
+                # 导航中途查询失败 → 等稳定后再数
+                await self._settle_after_navigation(attempts=3)
+                try:
+                    return len(await self.page.query_selector_all(".job-card-box"))
+                except Exception:
+                    return 0
+
+        last = await _count()
         stable = 0
         for _ in range(max_scrolls):
-            await self.page.mouse.wheel(0, 1400)
+            try:
+                await self.page.mouse.wheel(0, 1400)
+            except Exception:
+                pass
             human_delay(0.4, 0.8)
-            n = len(await self.page.query_selector_all(".job-card-box"))
+            n = await _count()
             if n <= last:
                 stable += 1
                 if stable >= stable_rounds:
@@ -918,6 +965,9 @@ class BossZhipinAutomator:
         """
         jobs = []
         try:
+            # 关键：抓取前先等导航/列表稳定。点 tab 等操作会触发异步导航，
+            # 若在导航过程中查询会报 "Execution context was destroyed"。
+            await self._settle_after_navigation()
             # 关键修复：先滚动到底把全部懒加载职位卡加载进 DOM，再统一抓取
             await self._scroll_load_all_cards()
             job_cards = await self.page.query_selector_all(".job-card-box")
@@ -959,6 +1009,46 @@ class BossZhipinAutomator:
             print(f"  [WARN] 获取职位列表失败: {e}")
 
         return jobs
+
+    async def _relocate_card(self, title: str, company: str):
+        """点击前按 title+company 从【当前 DOM】重新定位职位卡，返回新鲜的 ElementHandle。
+
+        Boss直聘 SPA 点开职位详情后会重渲染列表，使先前存的 handle 全部失效。
+        本方法每次都对 .job-card-box 做一次新查询并按文本匹配，避免 stale handle。
+        若目标卡当前未渲染（极端懒加载），向下滚动若干次寻找。
+        返回匹配的卡片 handle；找不到返回 None。
+        """
+        title = (title or "").strip()
+        company = (company or "").strip()
+
+        async def _find():
+            cards = await self.page.query_selector_all(".job-card-box")
+            for c in cards:
+                try:
+                    t_el = await c.query_selector(".job-name")
+                    co_el = await c.query_selector(".boss-name, .company-name")
+                    t = (await t_el.text_content()).strip() if t_el else ""
+                    co = (await co_el.text_content()).strip() if co_el else ""
+                    if t == title and (not company or co == company):
+                        return c
+                except Exception:
+                    continue
+            return None
+
+        card = await _find()
+        if card is not None:
+            return card
+        # 未找到 → 渐进下滚寻找（应对懒加载/虚拟列表）
+        for _ in range(30):
+            try:
+                await self.page.mouse.wheel(0, 1200)
+                human_delay(0.3, 0.6)
+            except Exception:
+                break
+            card = await _find()
+            if card is not None:
+                return card
+        return None
 
     async def _extract_job_description(self) -> str:
         """
@@ -1099,7 +1189,17 @@ class BossZhipinAutomator:
 
         try:
             # 点职位卡 → 详情面板（检查阶段，快速延迟）
-            card = job["element"]
+            # ⚠️ 不能直接用 get_job_listings 时存下的 job["element"]：Boss直聘 SPA 在点开
+            # 第一个职位详情后会重渲染列表，之前存的所有 ElementHandle 全部失效
+            # （"Element is not attached to the DOM"）。改为点击前按 title+company 从
+            # 当前 DOM 重新定位卡片，保证句柄新鲜。
+            card = await self._relocate_card(title, company)
+            if card is None:
+                # 兜底：尝试用原始 handle（可能仍有效，如首个职位）
+                card = job.get("element")
+            if card is None:
+                print(f"  [WARN] 未能重新定位职位卡，跳过: {company} | {title}")
+                return "fail"
             await card.scroll_into_view_if_needed()
             human_delay(0.4, 0.9)
             await card.click()
