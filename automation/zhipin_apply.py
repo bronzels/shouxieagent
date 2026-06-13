@@ -71,6 +71,16 @@ VERIFY_MODELS_MULTIMODAL = [
     "google/gemma-4-31b-it:free",
     "nvidia/nemotron-nano-12b-v2-vl:free",
 ]
+# 收费模型兜底链：免费模型全部多轮失败（429限流/402余额/内容异常）后升级到收费模型，
+# 保证任务能继续。选便宜且强的：Gemini Flash / GPT-4o-mini（都支持多模态）。
+VERIFY_MODELS_TEXT_PAID = [
+    "google/gemini-2.0-flash-001",
+    "openai/gpt-4o-mini",
+]
+VERIFY_MODELS_MULTIMODAL_PAID = [
+    "google/gemini-2.0-flash-001",
+    "openai/gpt-4o-mini",
+]
 # 正文文本判定为"足够"的最小长度；低于此视为反爬导致抓取失败，触发滚动重抓/多模态兜底
 MIN_DESC_LEN = 40
 
@@ -250,52 +260,104 @@ async def screenshot_page(page: Page, filename: str) -> str:
 
 # ─── OpenRouter API 调用 ──────────────────────────────────────────────────────
 
-async def _post_openrouter(payload: dict, models: list = None, max_rounds: int = 3) -> dict:
+def _is_multimodal_payload(payload: dict) -> bool:
+    """payload 是否含图片（用于免费模型耗尽后选对应的收费多模态兜底链）。"""
+    try:
+        for msg in payload.get("messages", []):
+            c = msg.get("content")
+            if isinstance(c, list) and any(
+                    isinstance(p, dict) and p.get("type") == "image_url" for p in c):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+async def _try_models_once(payload: dict, model_list: list) -> tuple:
+    """对给定模型列表各试一次。返回 (成功结果 or None, 是否需退避重试, retry_after秒, 末次错误)。
+
+    - 2xx 成功 → 返回结果
+    - 429/5xx → 该模型限流/服务端错误，换下个；整轮都这样则上层退避重试
+    - 402/401/403 → 余额/鉴权问题，换下个模型（免费链遇 402 极少；收费链遇 402=没钱）
     """
-    调用 OpenRouter，支持免费模型 fallback 链 + 429/5xx 退避重试。
-    - models：要依次尝试的 model id 列表（免费模型 provider 常被打满 429，
-      逐个尝试，哪个不限流用哪个）。不传则用 payload["model"] 单模型。
-    - 单模型 429 立即换下一个模型；整轮所有模型都 429 才退避等待重试整轮。
-    - 尊重 429 响应里的 retry_after_seconds / Retry-After。
+    retry_after = 0
+    last_err = None
+    transient = False
+    for m in model_list:
+        if not m:
+            continue
+        payload["model"] = m
+        try:
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                resp = await client.post(
+                    f"{OPENROUTER_BASE_URL}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                if resp.status_code in (429, 500, 502, 503, 408, 409):
+                    transient = True
+                    last_err = f"{m}:{resp.status_code}"
+                    try:
+                        meta = resp.json().get("error", {}).get("metadata", {})
+                        retry_after = max(retry_after, int(float(meta.get("retry_after_seconds", 0))))
+                    except Exception:
+                        pass
+                    continue
+                if resp.status_code in (401, 402, 403):
+                    # 余额/权限问题：换下个模型（可能升级到收费链时才有意义）
+                    last_err = f"{m}:{resp.status_code}"
+                    continue
+                resp.raise_for_status()
+                return resp.json(), False, 0, None
+        except Exception as e:
+            transient = True
+            last_err = f"{m}:{str(e)[:40]}"
+            continue
+    return None, transient, retry_after, last_err
+
+
+async def _post_openrouter(payload: dict, models: list = None, max_rounds: int = 3,
+                           paid_models: list = None) -> dict:
+    """
+    调用 OpenRouter，三级容错：免费模型 fallback 链 → 多轮退避重试 → 升级收费模型。
+    - models：依次尝试的免费 model id 列表（provider 常被打满 429，逐个试）。
+    - 单模型失败立即换下一个；整轮全失败则退避等待重试整轮（最多 max_rounds 轮）。
+    - 免费链多轮仍失败 → 自动升级到收费模型兜底链（paid_models，不传则按是否多模态
+      自动选 VERIFY_MODELS_TEXT_PAID / VERIFY_MODELS_MULTIMODAL_PAID），保证任务不中断。
+    - 尊重 429 响应里的 retry_after_seconds。
     """
     model_list = models or [payload.get("model")]
     delay = 4.0
     last_err = None
     for rnd in range(max_rounds):
-        retry_after = 0
-        for m in model_list:
-            payload["model"] = m
-            try:
-                async with httpx.AsyncClient(timeout=90.0) as client:
-                    resp = await client.post(
-                        f"{OPENROUTER_BASE_URL}/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                            "Content-Type": "application/json",
-                        },
-                        json=payload,
-                    )
-                    if resp.status_code in (429, 500, 502, 503):
-                        last_err = f"{m}:{resp.status_code}"
-                        try:
-                            meta = resp.json().get("error", {}).get("metadata", {})
-                            retry_after = max(retry_after, int(float(meta.get("retry_after_seconds", 0))))
-                        except Exception:
-                            pass
-                        continue  # 立即换下一个模型
-                    resp.raise_for_status()
-                    return resp.json()
-            except httpx.HTTPStatusError:
-                raise
-            except Exception as e:
-                last_err = f"{m}:{str(e)[:40]}"
-                continue
-        # 整轮所有模型都失败 → 退避后重试整轮
-        wait = max(delay, retry_after)
-        print(f"  ⏳ 免费模型全部限流({last_err})，{wait:.0f}s 后重试整轮 ({rnd+1}/{max_rounds})", flush=True)
-        await asyncio.sleep(wait)
-        delay = min(delay * 2, 40)
-    raise RuntimeError(f"OpenRouter 所有模型多轮重试仍失败: {last_err}")
+        result, transient, retry_after, err = await _try_models_once(payload, model_list)
+        if result is not None:
+            return result
+        last_err = err or last_err
+        if rnd < max_rounds - 1:
+            wait = max(delay, retry_after)
+            print(f"  ⏳ 免费模型全部失败({last_err})，{wait:.0f}s 后重试整轮 ({rnd+1}/{max_rounds})", flush=True)
+            await asyncio.sleep(wait)
+            delay = min(delay * 2, 40)
+
+    # 免费链多轮仍失败 → 升级收费模型兜底
+    if paid_models is None:
+        paid_models = (VERIFY_MODELS_MULTIMODAL_PAID if _is_multimodal_payload(payload)
+                       else VERIFY_MODELS_TEXT_PAID)
+    if paid_models:
+        print(f"  💳 免费模型多轮失败({last_err})，升级到收费模型兜底: {paid_models}", flush=True)
+        for rnd in range(2):
+            result, transient, retry_after, err = await _try_models_once(payload, paid_models)
+            if result is not None:
+                print(f"  ✅ 收费模型成功: {payload.get('model')}", flush=True)
+                return result
+            last_err = err or last_err
+            if rnd < 1:
+                await asyncio.sleep(max(4.0, retry_after))
+    raise RuntimeError(f"OpenRouter 免费+收费模型多轮重试仍失败: {last_err}")
 
 
 async def _post_uitars_remote(payload: dict) -> dict:
@@ -370,13 +432,28 @@ async def call_uitars(image_path: str, task_prompt: str) -> str:
         "max_tokens": 512,
     }
 
-    if UITARS_PROVIDER == "remote":
-        result = await _post_uitars_remote(payload)
-    elif UITARS_PROVIDER == "local":
-        result = await _post_uitars_local(payload)
-    else:  # openrouter（默认）
-        result = await _post_openrouter(payload)
-    return result["choices"][0]["message"]["content"]
+    # 容错重试：UI-TARS（本地 llama-cpp / remote / openrouter）可能瞬时失败或返回空，
+    # 重试若干次（指数退避）。openrouter 方式内部已有模型 fallback，这里再加一层调用级重试。
+    last_err = None
+    for attempt in range(3):
+        try:
+            if UITARS_PROVIDER == "remote":
+                result = await _post_uitars_remote(payload)
+            elif UITARS_PROVIDER == "local":
+                result = await _post_uitars_local(payload)
+            else:  # openrouter（默认）
+                result = await _post_openrouter(payload)
+            content = result["choices"][0]["message"]["content"]
+            if content and content.strip():
+                return content
+            last_err = "空响应"
+        except Exception as e:
+            last_err = str(e)[:80]
+        if attempt < 2:
+            print(f"  ⏳ UI-TARS({UITARS_PROVIDER}) 调用失败({last_err})，重试 ({attempt+1}/3)", flush=True)
+            await asyncio.sleep(2.0 * (attempt + 1))
+    print(f"  [WARN] UI-TARS({UITARS_PROVIDER}) 重试 3 次仍失败: {last_err}", flush=True)
+    return ""
 
 
 def _is_salary_obfuscated(salary_text: str) -> bool:
@@ -477,10 +554,61 @@ def parse_uitars_action(response: str, screen_width: int, screen_height: int) ->
             origin_resized_width=screen_width,
             model_type="qwen25vl",
         )
-        return parsed[0] if parsed else None
+        if parsed:
+            return parsed[0]
     except Exception as e:
+        # 本地 UI-TARS-1.5 常返回 <point>X Y</point> 坐标格式，ui_tars 包解析器
+        # （qwen25vl）不认会抛 "could not convert string to float: '<point>703'"。
+        # 退化用正则自行解析 action + 坐标。
+        fb = _fallback_parse_uitars(response)
+        if fb:
+            return fb
         print(f"  [WARN] 动作解析失败: {e}")
         return None
+    # 标准解析返回空 → 也尝试 fallback
+    return _fallback_parse_uitars(response)
+
+
+def _fallback_parse_uitars(response: str) -> dict | None:
+    """正则兜底解析 UI-TARS 响应（支持 <point>X Y</point> / (X,Y) / [x1,y1,x2,y2]）。
+
+    坐标统一按 0-1000 归一化到 0-1 的 start_box 字符串 "[x,y,x,y]"，与标准路径一致。
+    """
+    if not response:
+        return None
+    text = response
+    # 动作类型
+    m_act = re.search(r"\b(left_double|left_single|right_single|click|type|scroll|"
+                      r"drag|hotkey|wait|finished)\b", text, re.I)
+    action_type = (m_act.group(1).lower() if m_act else "click")
+    if action_type == "click":
+        action_type = "click"
+    # 坐标：优先 <point>X Y</point>，再 (X,Y)，再 [x1,y1,x2,y2]
+    nums = None
+    m = re.search(r"<point>\s*(\d+(?:\.\d+)?)[\s,]+(\d+(?:\.\d+)?)\s*</point>", text)
+    if m:
+        nums = [float(m.group(1)), float(m.group(2))]
+    if nums is None:
+        m = re.search(r"\(\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\)", text)
+        if m:
+            nums = [float(m.group(1)), float(m.group(2))]
+    if nums is None:
+        m = re.search(r"\[\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)", text)
+        if m:
+            nums = [float(m.group(1)), float(m.group(2))]
+    inputs = {}
+    if nums:
+        # 0-1000 → 0-1 归一化；start_box 用 [x,y,x,y] 点框
+        x = nums[0] / 1000.0
+        y = nums[1] / 1000.0
+        inputs["start_box"] = json.dumps([x, y, x, y])
+    # type 动作的文本内容
+    m_txt = re.search(r"(?:content|text)\s*=\s*['\"](.+?)['\"]", text, re.S)
+    if m_txt:
+        inputs["content"] = m_txt.group(1)
+    if not inputs:
+        return None
+    return {"action_type": action_type, "action_inputs": inputs}
 
 
 def _box_to_xy(action_inputs: dict, key: str, width: int, height: int) -> tuple[int, int] | None:
@@ -1010,45 +1138,57 @@ class BossZhipinAutomator:
 
         return jobs
 
-    async def _relocate_card(self, title: str, company: str):
-        """点击前按 title+company 从【当前 DOM】重新定位职位卡，返回新鲜的 ElementHandle。
+    async def _click_card_by_text(self, title: str, company: str) -> bool:
+        """用 Playwright Locator 按 title(+company) 定位并点击职位卡。
 
-        Boss直聘 SPA 点开职位详情后会重渲染列表，使先前存的 handle 全部失效。
-        本方法每次都对 .job-card-box 做一次新查询并按文本匹配，避免 stale handle。
-        若目标卡当前未渲染（极端懒加载），向下滚动若干次寻找。
-        返回匹配的卡片 handle；找不到返回 None。
+        关键：Locator 是惰性的，点击/滚动时才解析 DOM 并自动重试，因此对 Boss直聘
+        SPA 列表的重渲染（句柄 detach）免疫——这是替代 stale ElementHandle 的正确做法。
+        返回是否成功点击。
         """
         title = (title or "").strip()
         company = (company or "").strip()
+        if not title:
+            return False
 
-        async def _find():
-            cards = await self.page.query_selector_all(".job-card-box")
-            for c in cards:
-                try:
-                    t_el = await c.query_selector(".job-name")
-                    co_el = await c.query_selector(".boss-name, .company-name")
-                    t = (await t_el.text_content()).strip() if t_el else ""
-                    co = (await co_el.text_content()).strip() if co_el else ""
-                    if t == title and (not company or co == company):
-                        return c
-                except Exception:
-                    continue
-            return None
+        # 优先 title+company 双重过滤（避免同名标题歧义），失败再退化为仅 title
+        candidates = []
+        loc_tc = self.page.locator(".job-card-box").filter(
+            has=self.page.locator(".job-name", has_text=title))
+        if company:
+            loc_tc = loc_tc.filter(has=self.page.locator(".boss-name, .company-name",
+                                                         has_text=company))
+        candidates.append(loc_tc.first)
+        candidates.append(
+            self.page.locator(".job-card-box").filter(
+                has=self.page.locator(".job-name", has_text=title)).first)
 
-        card = await _find()
-        if card is not None:
-            return card
-        # 未找到 → 渐进下滚寻找（应对懒加载/虚拟列表）
-        for _ in range(30):
+        for loc in candidates:
             try:
-                await self.page.mouse.wheel(0, 1200)
-                human_delay(0.3, 0.6)
+                # 目标卡可能在懒加载下方未渲染：先确认存在，必要时滚动加载
+                if await loc.count() == 0:
+                    for _ in range(20):
+                        try:
+                            await self.page.mouse.wheel(0, 1400)
+                        except Exception:
+                            break
+                        human_delay(0.25, 0.5)
+                        if await loc.count() > 0:
+                            break
+                if await loc.count() == 0:
+                    continue
+                await loc.scroll_into_view_if_needed(timeout=5000)
+                human_delay(0.3, 0.7)
+                bb = await loc.bounding_box()
+                if bb:
+                    await human_mouse_move_and_click(
+                        self.page, int(bb["x"] + bb["width"] / 2),
+                        int(bb["y"] + bb["height"] / 2))
+                else:
+                    await loc.click(timeout=5000)
+                return True
             except Exception:
-                break
-            card = await _find()
-            if card is not None:
-                return card
-        return None
+                continue
+        return False
 
     async def _extract_job_description(self) -> str:
         """
@@ -1189,20 +1329,13 @@ class BossZhipinAutomator:
 
         try:
             # 点职位卡 → 详情面板（检查阶段，快速延迟）
-            # ⚠️ 不能直接用 get_job_listings 时存下的 job["element"]：Boss直聘 SPA 在点开
-            # 第一个职位详情后会重渲染列表，之前存的所有 ElementHandle 全部失效
-            # （"Element is not attached to the DOM"）。改为点击前按 title+company 从
-            # 当前 DOM 重新定位卡片，保证句柄新鲜。
-            card = await self._relocate_card(title, company)
-            if card is None:
-                # 兜底：尝试用原始 handle（可能仍有效，如首个职位）
-                card = job.get("element")
-            if card is None:
-                print(f"  [WARN] 未能重新定位职位卡，跳过: {company} | {title}")
+            # ⚠️ 不能用 get_job_listings 时存下的 ElementHandle：Boss直聘 SPA 列表会持续
+            # 重渲染（点开详情/轮询刷新），存的句柄会 detach（"Element is not attached"）。
+            # 用 Playwright Locator（点击时才解析、自动重试/滚动），对重渲染免疫。
+            clicked = await self._click_card_by_text(title, company)
+            if not clicked:
+                print(f"  [WARN] 未能定位/点击职位卡，跳过: {company} | {title}")
                 return "fail"
-            await card.scroll_into_view_if_needed()
-            human_delay(0.4, 0.9)
-            await card.click()
             human_delay(CARD_DELAY_MIN, CARD_DELAY_MAX)
 
             # 抓取职位描述正文
