@@ -202,7 +202,7 @@ class PositionTabsAutomator(BossZhipinAutomator):
         print(f"  导航到职位列表首页: {ZHIPIN_JOBS_HOME}")
         try:
             await self.page.goto(ZHIPIN_JOBS_HOME, wait_until="domcontentloaded", timeout=30000)
-            human_delay(3.0, 5.0)
+            human_delay(1.2, 2.0)
             # 检查是否有职位卡或 tab 区域（说明导航成功）
             try:
                 await self.page.wait_for_selector(
@@ -222,7 +222,7 @@ class PositionTabsAutomator(BossZhipinAutomator):
         # 回退方式：先回首页，再点「职位」按钮
         try:
             await self.page.goto("https://www.zhipin.com/", wait_until="domcontentloaded", timeout=30000)
-            human_delay(2.0, 3.0)
+            human_delay(1.0, 1.6)
         except Exception:
             return False
 
@@ -242,7 +242,7 @@ class PositionTabsAutomator(BossZhipinAutomator):
             print("  [WARN] 未能找到并点击「职位」导航按钮")
             return False
 
-        human_delay(3.0, 5.0)
+        human_delay(1.2, 2.0)
         await screenshot_page(self.page, "position_tabs_home_fallback.png")
         return True
 
@@ -300,7 +300,7 @@ class PositionTabsAutomator(BossZhipinAutomator):
             print(f"  [WARN] 未能点击 tab: {tab_name}")
             return False
 
-        human_delay(2.0, 4.0)
+        human_delay(1.0, 1.8)
         # 等待 tab 内容加载（职位卡出现）
         try:
             await self.page.wait_for_selector(".job-card-box", timeout=8000)
@@ -407,7 +407,7 @@ class PositionTabsAutomator(BossZhipinAutomator):
                         break
                     # tab 间休息
                     import random
-                    rest = random.uniform(3.0, 6.0)
+                    rest = random.uniform(2.0, 3.5)
                     print(f"\n  tab 间休息 {rest:.1f}s...")
                     await asyncio.sleep(rest)
 

@@ -261,7 +261,7 @@ class LlmSzAutomator(BossZhipinAutomator):
         for attempt in range(2):
             try:
                 await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                human_delay(3.0, 5.0)
+                human_delay(1.2, 2.0)
                 try:
                     await self.page.wait_for_selector(".job-card-box", timeout=10000)
                 except Exception:
@@ -272,7 +272,7 @@ class LlmSzAutomator(BossZhipinAutomator):
                     return True
                 if attempt == 0:
                     print("  0个职位（疑似首次导航安全校验），重试一次...")
-                    human_delay(3.0, 5.0)
+                    human_delay(1.2, 2.0)
             except Exception as e:
                 print(f"  [WARN] 列表导航失败(尝试{attempt+1}): {e}")
         return False

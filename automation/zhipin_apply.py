@@ -110,12 +110,12 @@ DEFAULT_HOT_CITIES = list(CITY_CODES.keys())
 # 人类操作延迟范围（秒）
 # 策略：检查/跳过的职位走快速延迟（读取动作为主，对 zhipin 真实请求少，风险低）；
 #       真正投递（立即沟通发招呼）走稳健延迟（发真实消息，且有每日打招呼上限，需谨慎）。
-DELAY_MIN = 0.8          # 职位间隔（检查阶段，下调）
-DELAY_MAX = 1.8
-CARD_DELAY_MIN = 1.2     # 点职位卡→详情面板（检查阶段，下调）
-CARD_DELAY_MAX = 2.2
-APPLY_DELAY_MIN = 3.0    # 投递动作（立即沟通后）保持稳健
-APPLY_DELAY_MAX = 5.0
+DELAY_MIN = 0.3          # 职位间隔（检查阶段，已调快）
+DELAY_MAX = 0.7
+CARD_DELAY_MIN = 0.4     # 点职位卡→详情面板（检查阶段，已调快）
+CARD_DELAY_MAX = 0.9
+APPLY_DELAY_MIN = 1.5    # 投递动作（立即沟通后，已调快但仍留余量）
+APPLY_DELAY_MAX = 2.5
 
 # ─── 工具函数 ─────────────────────────────────────────────────────────────────
 
@@ -622,7 +622,7 @@ class BossZhipinAutomator:
         """导航到Boss直聘"""
         print("🌐 正在打开 Boss直聘...")
         await self.page.goto("https://www.zhipin.com/", wait_until="domcontentloaded", timeout=30000)
-        human_delay(3.0, 5.0)
+        human_delay(1.2, 2.0)
         title = await self.page.title()
         print(f"  页面标题: {title} | URL: {self.page.url}", flush=True)
         if "验证" in title or "security" in self.page.url.lower():
@@ -769,7 +769,7 @@ class BossZhipinAutomator:
         print(f"  🗺️ 打开地图选城市页 ({city})")
         try:
             await self.page.goto(map_url, wait_until="domcontentloaded", timeout=30000)
-            human_delay(3.0, 5.0)
+            human_delay(1.2, 2.0)
             # 等待地图页城市选择器渲染（地图 JS 初始化较慢）
             try:
                 await self.page.wait_for_selector(
@@ -805,7 +805,7 @@ class BossZhipinAutomator:
         if not ok:
             print(f"  [WARN] 未能在面板点选城市: {city}")
             return False
-        human_delay(2.0, 3.5)
+        human_delay(1.0, 1.8)
 
         confirmed = await self._read_current_city()
         print(f"  ✅ 地图面板已选择城市，页面城市标签确认为: [{confirmed}]")
@@ -826,7 +826,7 @@ class BossZhipinAutomator:
         for attempt in range(2):
             try:
                 await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                human_delay(3.0, 5.0)
+                human_delay(1.2, 2.0)
                 try:
                     await self.page.wait_for_selector(".job-card-box", timeout=10000)
                 except Exception:
@@ -840,7 +840,7 @@ class BossZhipinAutomator:
                     return True
                 if attempt == 0:
                     print("  ↻ 0 个职位（疑似首次导航安全校验），重试一次...")
-                    human_delay(3.0, 5.0)
+                    human_delay(1.2, 2.0)
             except Exception as e:
                 print(f"  [WARN] 列表导航失败(尝试{attempt+1}): {e}")
         return False
@@ -862,7 +862,7 @@ class BossZhipinAutomator:
         stable = 0
         for _ in range(max_scrolls):
             await self.page.mouse.wheel(0, 1400)
-            human_delay(0.9, 1.6)
+            human_delay(0.4, 0.8)
             n = len(await self.page.query_selector_all(".job-card-box"))
             if n <= last:
                 stable += 1
@@ -1292,8 +1292,8 @@ class BossZhipinAutomator:
                         print("\n🛑 当日沟通次数已用完，停止所有城市处理，明天再跑。", flush=True)
                         break
 
-                    # 城市间休息（防止触发反爬）
-                    rest_time = random.uniform(5.0, 10.0)
+                    # 城市间休息（防止触发反爬，已调快）
+                    rest_time = random.uniform(2.0, 4.0)
                     print(f"\n  😴 城市间休息 {rest_time:.1f} 秒...")
                     await asyncio.sleep(rest_time)
 
