@@ -199,16 +199,81 @@ def export_applications_csv(data: dict) -> str:
 
 # ─── 职位筛选 ─────────────────────────────────────────────────────────────────────
 
-async def verify_jobsdb(title: str, desc: str, image_path: str = None) -> tuple[bool, str]:
+async def verify_jobsdb(title: str, desc: str, image_path: str = None,
+                        filter_mode: str = "remote", location: str = "",
+                        salary: str = "") -> tuple[bool, str]:
     """
-    判断 JobsDB 职位是否满足投递条件（英文 JD）：
-    1. 必须是软件开发岗（同 zhipin 标准，排除运维/PHP/Django/C#/.NET）
-    2. 必须支持远程(remote/WFH/work from home)
-    3. 不能要求粤语(Cantonese)——这是 JobsDB 特有检查项
+    判断 JobsDB 职位是否满足投递条件（英文 JD）。支持两种筛选模式：
+
+    filter_mode="remote"（默认，原条件）：
+      1. 软件开发岗（排除运维/PHP/Django/C#/.NET）
+      2. 支持远程(remote/WFH)
+      3. 不要求粤语(Cantonese)
+
+    filter_mode="hk-region"（新条件，地区+工作+薪资合并一次判断，省调用）：
+      1. **大模型(LLM)开发相关**岗（不是泛软件开发，需与大语言模型/LLM/GenAI/
+         Agent/RAG/多模态大模型等相关的开发岗）
+      2. 不要求粤语
+      3. 地区：远程(最优) 或 深圳 或 香港【九龙Kowloon/新界New Territories】；
+         排除 香港岛(Hong Kong Island，如 Central/Wan Chai/Causeway Bay/
+         North Point/Quarry Bay) 和 离岛(Islands，如 Lantau/Tung Chung/Discovery Bay)
+      4. 月薪上限 ≥ 50K HKD；**薪资未标明则视为满足**（给机会），
+         仅当明确标出且上限 < 50K 才判不满足
 
     返回 (should_apply, reason_text)
     """
-    prompt = f"""You are a strict job filter assistant. Evaluate whether this job meets ALL THREE criteria.
+    if filter_mode == "hk-region":
+        prompt = f"""You are a strict job filter assistant for Hong Kong / Shenzhen LLM-development roles.
+Evaluate whether this job meets ALL FOUR criteria. Only recommend applying if ALL are met.
+
+[Condition 1: Must be a LARGE LANGUAGE MODEL (LLM) / GenAI development role]
+✅ Accept (core work is developing with/around large models):
+   LLM / Large Language Model engineer, GenAI / Generative AI engineer,
+   AI Engineer building LLM apps, Agent / RAG / prompt engineering,
+   multimodal large-model, model training / fine-tuning / inference / serving,
+   ML engineer whose work is centered on large models.
+❌ Reject:
+   - Generic software dev NOT related to large models (plain backend/frontend/mobile,
+     traditional ML/CV/recommendation without LLM focus)
+   - Operations/DevOps/SRE/SysAdmin, Data Annotation, Content/User Ops,
+     Product Manager, Sales/Marketing/BD, HR, Customer Service, Designer, Teacher,
+     Medical/Legal/Finance specialist roles
+
+[Condition 2: Must NOT require Cantonese]
+   Mandatory Cantonese (粤语) → FAIL. (English / Mandarin are fine.)
+
+[Condition 3: Work LOCATION must be one of: Remote / Shenzhen / Hong Kong Kowloon / Hong Kong New Territories]
+   Job location text: "{location or 'N/A'}"
+   ✅ Accept: explicitly Remote/WFH (BEST); or Shenzhen (深圳);
+      or Hong Kong area in KOWLOON (e.g. Kowloon, Kwun Tong, Mong Kok, Hung Hom,
+      Sham Shui Po, Kowloon Bay, Tsim Sha Tsui, Lai Chi Kok, Cheung Sha Wan)
+      or NEW TERRITORIES (e.g. Sha Tin, Tsuen Wan, Kwai Chung, Tai Po, Fanling,
+      Yuen Long, Tseung Kwan O, Fo Tan, Tuen Mun).
+   ❌ Reject: HONG KONG ISLAND (Central, Admiralty, Wan Chai, Causeway Bay,
+      North Point, Quarry Bay, Sheung Wan, Aberdeen) or ISLANDS
+      (Lantau, Tung Chung, Discovery Bay, Cheung Chau).
+   If location is unclear/empty → treat as PASS (do not reject on location alone).
+
+[Condition 4: Monthly salary UPPER bound must be >= 50K HKD]
+   If a salary range/upper bound is stated and its upper bound < 50K HKD/month → FAIL.
+   If NO salary is stated, or it's annual/unclear → treat as PASS (give it a chance).
+   Stated salary (from listing, may be empty): "{salary or 'N/A'}"
+
+Job Title: {title}
+
+Job Description:
+{desc}
+
+Reply STRICTLY in this format (the "Conclusion" line is mandatory):
+Is LLM/GenAI dev role: Yes/No (explain: large-model-related responsibilities)
+Requires Cantonese: Yes/No (if Yes → must not apply)
+Location category: Remote / Shenzhen / Kowloon / New Territories / Hong Kong Island / Islands / Unknown
+Location OK: Yes/No
+Salary upper >= 50K: Yes/No/Unknown (Unknown or not-stated counts as OK)
+Conclusion: Apply / Do not apply
+Reason: (one sentence, key reason)"""
+    else:
+        prompt = f"""You are a strict job filter assistant. Evaluate whether this job meets ALL THREE criteria.
 Only recommend applying if ALL conditions are met.
 
 [Condition 1: Must be a software/IT DEVELOPMENT role]
@@ -280,6 +345,59 @@ Reason: (one sentence, key reason)"""
     return should_apply, answer
 
 
+# ─── 地区分类（hk-region 模式）────────────────────────────────────────────────────
+# JobsDB 详情页 location 文本格式如 "Hung Hom, Kowloon City District"，含香港18区。
+# 用代码确定性判断比丢给免费 LLM 更可靠，且港岛/离岛可直接跳过、省一次 LLM 调用。
+
+# 香港岛（拒）：4 个 District + 常见地名
+_HK_ISLAND_KW = [
+    "hong kong island", "central and western", "wan chai district", "eastern district",
+    "southern district", "central,", "admiralty", "sheung wan", "causeway bay",
+    "north point", "quarry bay", "wan chai", "aberdeen", "chai wan", "tai koo",
+    "fortress hill", "tin hau", "happy valley", "mid-levels", "kennedy town",
+]
+# 离岛（拒）：Islands District + 常见地名
+_HK_ISLANDS_KW = [
+    "islands district", "lantau", "tung chung", "discovery bay", "cheung chau",
+    "lamma", "peng chau", "mui wo",
+]
+# 九龙（投）
+_HK_KOWLOON_KW = [
+    "kowloon", "kwun tong", "mong kok", "hung hom", "sham shui po", "kowloon bay",
+    "tsim sha tsui", "lai chi kok", "cheung sha wan", "wong tai sin", "yau ma tei",
+    "ho man tin", "diamond hill", "san po kong", "kowloon tong", "to kwa wan",
+]
+# 新界（投，注意排除 Islands District）
+_HK_NT_KW = [
+    "new territories", "sha tin", "shatin", "tsuen wan", "kwai chung", "kwai tsing",
+    "tai po", "fanling", "sheung shui", "yuen long", "tseung kwan o", "fo tan",
+    "tuen mun", "sai kung", "ma on shan", "tin shui wai", "north district",
+]
+
+
+def classify_hk_location(location: str) -> str:
+    """
+    确定性判断 JobsDB 地区文本属于哪类，用于 hk-region 模式。
+    返回: "accept"（深圳/九龙/新界）| "reject"（港岛/离岛）| "unknown"（无法判断→不据此拒）。
+    远程不在此判断（远程由 JD 正文交给 LLM/或地区为空时视为 unknown 放行）。
+    """
+    if not location:
+        return "unknown"
+    s = location.lower()
+    if "shenzhen" in s or "深圳" in location:
+        return "accept"
+    # 先判离岛/港岛（拒），再判九龙/新界（投）——避免 "Islands District" 被 NT 误收
+    if any(k in s for k in _HK_ISLANDS_KW):
+        return "reject"
+    if any(k in s for k in _HK_ISLAND_KW):
+        return "reject"
+    if any(k in s for k in _HK_KOWLOON_KW):
+        return "accept"
+    if any(k in s for k in _HK_NT_KW):
+        return "accept"
+    return "unknown"
+
+
 # ─── 薪资解析 ─────────────────────────────────────────────────────────────────────
 
 def parse_salary_fill(salary_text: str) -> int:
@@ -323,6 +441,7 @@ class JobsDBAutomator:
     def __init__(self, dry_run=False):
         self.applied_data = load_applied_jobs()
         self.dry_run = dry_run  # 试运行：登录+遍历+筛选+判断，但不点Apply/不填表单/不记录
+        self.filter_mode = "remote"  # 筛选模式：remote(默认) | hk-region(大模型+深/九/新界+50k)
         self.cdp_url = None     # 若设置，则连接已运行的真实 Chrome（绕过 Cloudflare）
         self.connected_cdp = False
         self.page: Page = None
@@ -977,6 +1096,14 @@ class JobsDBAutomator:
                     if len(t) >= MIN_DESC_LEN:
                         desc = t
                         break
+            # 顺带抓地区（实测 [data-automation='job-detail-location']，
+            # 文本如 "Hung Hom, Kowloon City District"），hk-region 模式判断用
+            try:
+                loc_el = await self.page.query_selector("[data-automation='job-detail-location']")
+                if loc_el:
+                    job["location"] = (await loc_el.text_content() or "").strip()
+            except Exception:
+                pass
         except Exception as e:
             print(f"  [WARN] 打开详情页失败: {e}", flush=True)
 
@@ -1380,9 +1507,25 @@ class JobsDBAutomator:
         if len(desc) < MIN_DESC_LEN:
             print(f"  ⚠️ 正文抓取不足({len(desc)}字)，仍按文本(标题+少量正文)判断，不截图OCR", flush=True)
 
-        # LLM 验证（纯文本，绝不传截图）
+        # hk-region 模式：先用代码确定性判断地区，港岛/离岛直接跳过（省一次 LLM 调用）
+        if getattr(self, "filter_mode", "remote") == "hk-region":
+            loc = job.get("location", "")
+            loc_cat = classify_hk_location(loc)
+            if loc_cat == "reject":
+                print(f"  ⏭️  [跳过-地区港岛/离岛] {company} | {title} @ {loc}", flush=True)
+                record_job(self.applied_data, company, title, "skipped_region", source, salary_text)
+                stat["reject"] += 1
+                self._print_progress(stat)
+                return "reject"
+
+        # LLM 验证（纯文本，绝不传截图）。hk-region 模式把地区+工作+薪资合并一次判断
         try:
-            should_apply, reason = await verify_jobsdb(title, desc, None)
+            should_apply, reason = await verify_jobsdb(
+                title, desc, None,
+                filter_mode=getattr(self, "filter_mode", "remote"),
+                location=job.get("location", ""),
+                salary=salary_text,
+            )
         except Exception as e:
             print(f"  [ERROR] LLM 验证失败: {e}", flush=True)
             stat["fail"] += 1
@@ -1651,6 +1794,11 @@ def _build_arg_parser():
         help="连接已运行的真实 Chrome（CDP），绕过 Cloudflare。需先用 "
              "--remote-debugging-port=9222 启动 Chrome 并手动通过验证+登录。如 http://127.0.0.1:9222",
     )
+    parser.add_argument(
+        "--filter-mode", choices=["remote", "hk-region"], default="remote",
+        help="筛选模式：remote(默认)=软件开发+远程+无粤语；"
+             "hk-region=大模型开发相关+无粤语+地区(远程/深圳/九龙/新界,排除港岛离岛)+月薪上限≥50K(未标视为满足)。",
+    )
     return parser
 
 
@@ -1697,7 +1845,11 @@ def main():
     if args.dry_run:
         print("🧪 dry-run 试运行：登录+遍历+筛选+判断，不实际申请", flush=True)
 
+    mode_desc = {"remote": "远程+软件开发", "hk-region": "大模型+深圳/九龙/新界+50K"}
+    print(f"🎯 筛选模式: {args.filter_mode}（{mode_desc.get(args.filter_mode, '')}）", flush=True)
+
     automator = JobsDBAutomator(dry_run=args.dry_run)
+    automator.filter_mode = args.filter_mode
     if args.cdp_url:
         automator.cdp_url = args.cdp_url
     asyncio.run(automator.run())
