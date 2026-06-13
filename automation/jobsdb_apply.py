@@ -225,7 +225,7 @@ Only recommend applying if ALL conditions are met.
 Job Title: {title}
 
 Job Description:
-{desc[:2000]}
+{desc}
 
 Reply STRICTLY in this format (the "Conclusion" line is mandatory):
 Is software dev role: Yes/No (explain: specific dev responsibilities or tech stack)
@@ -733,8 +733,9 @@ class JobsDBAutomator:
         human_delay(3.0, 5.0)
         await screenshot_page(self.page, "jobsdb_ai_results.png")
 
-        # 逐页抓取 normalJob 卡，翻页到尾（page-next）。带页数上限防失控。
-        MAX_PAGES = 30
+        # 逐页抓取 normalJob 卡，翻页到尾。上限设大以覆盖全部（约1510个/30每页≈51页），
+        # 防失控保留一个上限。
+        MAX_PAGES = 60
         all_jobs = []
         seen = set()
         for pno in range(1, MAX_PAGES + 1):
