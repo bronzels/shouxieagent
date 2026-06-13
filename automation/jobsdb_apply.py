@@ -764,14 +764,26 @@ class JobsDBAutomator:
                 newn += 1
             print(f"    第 {pno} 页: +{newn} 个（累计 {len(all_jobs)}）", flush=True)
 
-            # 翻下一页
-            nxt = await self.page.query_selector("[data-automation='page-next']")
-            if not nxt or not await nxt.is_visible() or not await nxt.is_enabled():
-                print("    已到最后一页", flush=True)
+            # 翻下一页：JobsDB 分页是数字页码 a[data-automation='page-N']（实测 page-2/3…），
+            # 优先点下一页码，其次尝试 page-next/Next 箭头。
+            nxt = None
+            for sel in [f"a[data-automation='page-{pno+1}']",
+                        "[data-automation='page-next']",
+                        "a[aria-label='Next']", "a[rel='next']"]:
+                try:
+                    el = await self.page.query_selector(sel)
+                    if el and await el.is_visible():
+                        nxt = el
+                        break
+                except Exception:
+                    continue
+            if not nxt:
+                print("    已到最后一页（无下一页链接）", flush=True)
                 break
             try:
                 await nxt.click()
                 await self.page.wait_for_load_state("domcontentloaded", timeout=20000)
+                human_delay(1.5, 2.5)
             except Exception:
                 break
         else:
@@ -1209,7 +1221,7 @@ class JobsDBAutomator:
             return "fail"
 
         verdict = "✅ 投递" if should_apply else "❌ 跳过"
-        print(f"  🤖 判断[{verdict}]: {reason[:200].replace(chr(10), ' ')}", flush=True)
+        print(f"  🤖 判断[{verdict}]: {reason[:400].replace(chr(10), ' ')}", flush=True)
 
         if not should_apply:
             record_job(self.applied_data, company, title, "skipped_reject", source, salary_text)
