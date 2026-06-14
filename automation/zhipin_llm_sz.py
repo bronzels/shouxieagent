@@ -333,12 +333,23 @@ class LlmSzAutomator(BossZhipinAutomator):
                         print("  滚动加载后仍无职位")
                     else:
                         print(f"  共 {len(jobs)} 个职位（已滚动加载全部），逐个检查...")
+                        verified_count = 0  # 前3个成功投递去消息页核验
                         for job in jobs:
                             status = await self.apply_to_job(job, self.city)
                             stat["checked"] += 1
                             if status in stat:
                                 stat[status] += 1
                             self._mark_processed(job.get("company", ""), job.get("title", ""), self.city, status)
+                            # 前 3 个成功投递去消息页核验确实发了招呼（用户要求）
+                            if status == "applied" and verified_count < 3:
+                                verified_count += 1
+                                print(f"     🔍 第 {verified_count}/3 个成功投递，去消息页核验...", flush=True)
+                                await self._verify_greet_in_messages(
+                                    job.get("company", ""), job.get("title", ""))
+                                try:
+                                    await self.page.bring_to_front()
+                                except Exception:
+                                    pass
                             skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
                             print(f"     [进度] 检查 {stat['checked']}/{len(jobs)} | "
                                   f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")

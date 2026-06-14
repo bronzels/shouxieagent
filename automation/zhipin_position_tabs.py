@@ -369,6 +369,7 @@ class PositionTabsAutomator(BossZhipinAutomator):
             return stat
 
         print(f"  tab【{tab_name}】共 {len(jobs)} 个职位，逐个检查...")
+        verified_count = 0  # 每个 tab 前3个成功投递去消息页核验
         for job in jobs:
             # apply_to_job 会调用 self.verify_fn（即 _verify_mixed_no_location）
             # _verify_mixed_no_location 根据标题+描述中的关键字判断远程/深圳路径
@@ -377,6 +378,15 @@ class PositionTabsAutomator(BossZhipinAutomator):
             if status in stat:
                 stat[status] += 1
             self._mark_processed(job.get("company", ""), job.get("title", ""), f"tab-{tab_name}", status)
+            # 每个 tab 前 3 个成功投递去消息页核验确实发了招呼（用户要求）
+            if status == "applied" and verified_count < 3:
+                verified_count += 1
+                print(f"     🔍 [tab {tab_name}] 第 {verified_count}/3 个成功投递，去消息页核验...", flush=True)
+                await self._verify_greet_in_messages(job.get("company", ""), job.get("title", ""))
+                try:
+                    await self.page.bring_to_front()
+                except Exception:
+                    pass
             skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
             print(f"     [tab {tab_name}] 检查 {stat['checked']} | "
                   f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")
