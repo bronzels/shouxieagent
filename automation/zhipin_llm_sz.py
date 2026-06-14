@@ -338,7 +338,7 @@ class LlmSzAutomator(BossZhipinAutomator):
                             stat["checked"] += 1
                             if status in stat:
                                 stat[status] += 1
-                            self._mark_processed(job.get("company", ""), job.get("title", ""), self.city)
+                            self._mark_processed(job.get("company", ""), job.get("title", ""), self.city, status)
                             skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
                             print(f"     [进度] 检查 {stat['checked']}/{len(jobs)} | "
                                   f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")

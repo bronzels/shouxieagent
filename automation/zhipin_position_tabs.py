@@ -376,7 +376,7 @@ class PositionTabsAutomator(BossZhipinAutomator):
             stat["checked"] += 1
             if status in stat:
                 stat[status] += 1
-            self._mark_processed(job.get("company", ""), job.get("title", ""), f"tab-{tab_name}")
+            self._mark_processed(job.get("company", ""), job.get("title", ""), f"tab-{tab_name}", status)
             skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
             print(f"     [tab {tab_name}] 检查 {stat['checked']} | "
                   f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")

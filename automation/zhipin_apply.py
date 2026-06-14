@@ -980,8 +980,14 @@ class BossZhipinAutomator:
         """操作前守卫：检测到验证返回 True（调用方应跳过本次操作/重试）。供各操作循环调用。"""
         return await self._check_anti_scrape()
 
-    def _mark_processed(self, company: str, title: str, city: str = ""):
-        """断点续跑：标记一个职位已处理（判断完），并周期性落盘断点文件。"""
+    def _mark_processed(self, company: str, title: str, city: str = "", status: str = ""):
+        """断点续跑：标记一个职位已处理（判断完），并周期性落盘断点文件。
+
+        status=="fail"（点击/LLM/网络等出错）的职位【不标记】，以便网络/服务恢复后
+        重启能重新处理它，避免把临时失败的职位永久跳过。
+        """
+        if status == "fail":
+            return
         if not hasattr(self, "_ckpt_processed"):
             self._ckpt_processed = load_checkpoint(getattr(self, "task_label", ""))["processed"]
         key = f"{(company or '').strip()}|{(title or '').strip()}"
@@ -1716,7 +1722,7 @@ class BossZhipinAutomator:
                     if status in stat:
                         stat[status] += 1
                     # 断点续跑：记录此职位已处理（含判断完跳过的），落盘
-                    self._mark_processed(job.get("company", ""), job.get("title", ""), city)
+                    self._mark_processed(job.get("company", ""), job.get("title", ""), city, status)
                     # 实时累计进度提示
                     skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
                     print(f"     ▸ [{city}] 进度：检查 {stat['checked']}/{len(jobs)} | "
