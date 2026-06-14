@@ -1449,6 +1449,69 @@ class BossZhipinAutomator:
             pass
         return False
 
+    async def _confirm_greet_sent(self) -> bool:
+        """确认点'立即沟通'后招呼【真的发出去了】。成功信号（任一）：
+          - 出现"已向BOSS发送消息"弹窗 .greet-boss-dialog
+          - 按钮变成"继续沟通"（说明已建立会话）
+          - 页面跳到聊天页 /chat
+        轮询 ~3 秒。没有任一信号 → 视为未发送（可能触发反爬/点空）。
+        """
+        for _ in range(6):
+            try:
+                d = await self.page.query_selector(".greet-boss-dialog")
+                if d and await d.is_visible():
+                    return True
+                if "/chat" in (self.page.url or "").lower():
+                    return True
+                cont = await self.page.query_selector("a:has-text('继续沟通')")
+                if cont and await cont.is_visible():
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        return False
+
+    async def _verify_greet_in_messages(self, company: str, title: str) -> bool:
+        """去【消息】页核验确实给该 boss 发了招呼（每城前3个用，最终事实校验）。
+
+        独立开一个新标签页访问消息页，找最近会话核对公司名+是否有已发消息，
+        截图留证。不干扰主列表页。校验失败只告警+截图，不影响投递记录。
+        返回 True=核验到已发送，False=未核验到，None=核验过程异常。
+        """
+        vp = None
+        try:
+            vp = await self.context.new_page()
+            await vp.goto("https://www.zhipin.com/web/geek/chat", wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(2.5)
+            info = await vp.evaluate(r"""(company) => {
+                const items=[...document.querySelectorAll('.user-list li, [class*="chat-list"] li, [role="listitem"]')];
+                const out={count:items.length, top:'', matched:false, hasMsg:false};
+                for(let i=0;i<Math.min(items.length,5);i++){
+                    const t=(items[i].textContent||'').trim();
+                    if(i===0) out.top=t.slice(0,60);
+                    if(company && t.includes(company.slice(0,4))){ out.matched=true; }
+                }
+                // 是否有"已发送/打招呼"等痕迹
+                out.hasMsg=/已发送|你好|您好|打招呼|请问|发简历|简历/.test(document.body.textContent||'');
+                return out;
+            }""", company)
+            safe = re.sub(r"[^\w一-龥]", "_", f"{company}_{title}")[:40]
+            await vp.screenshot(path=str(SCREENSHOTS_DIR / f"verify_msg_{safe}.png"))
+            ok = info.get("matched") or (info.get("count", 0) > 0 and info.get("hasMsg"))
+            mark = "✅ 已核验" if ok else "⚠️ 未核验到"
+            print(f"     🔍 [消息页核验] {mark}：会话数={info.get('count')} 顶部会话='{info.get('top')}' "
+                  f"匹配公司={info.get('matched')}（截图 verify_msg_{safe}.png）", flush=True)
+            return ok
+        except Exception as e:
+            print(f"     [WARN] 消息页核验异常: {str(e)[:60]}", flush=True)
+            return None
+        finally:
+            try:
+                if vp:
+                    await vp.close()
+            except Exception:
+                pass
+
     async def _handle_limit_popup(self) -> str:
         """
         处理 zhipin 每日沟通次数限制弹窗（"温馨提示"）：
@@ -1656,15 +1719,28 @@ class BossZhipinAutomator:
                 # 当日次数用完：本职位未成功投递，标志已置位，调用方循环会停止
                 return "limit_exhausted"
 
-            # 关闭"已向BOSS发送消息"弹窗（点X），避免遮罩挡住下一个职位的点击
-            await screenshot_page(self.page, "greet_dialog.png")
+            # ⚠️ 关键：必须【确认招呼真的发出去了】才算投递成功。
+            # 之前只要点了按钮+关弹窗就记 applied，但若点击时触发反爬/验证、或按钮点空，
+            # 招呼根本没发，却被记成假投递（用户在 app 端看不到任何投递）。
+            sent = await self._confirm_greet_sent()
+            if not sent:
+                await screenshot_page(self.page, f"greet_fail_{safe}.png")
+                # 可能是触发了安全验证 → 检测+暂停等用户处理
+                if await self._check_anti_scrape():
+                    print(f"  ⚠️ [未投递-触发安全验证] {company} | {title}（已暂停处理，未记录）")
+                    return "fail"
+                print(f"  ⚠️ [未投递-未确认招呼发送] {company} | {title}（未出现'已发送'确认，不记录）")
+                await self._close_greet_dialog()
+                return "fail"
+
+            # 确认已发送 → 关闭"已向BOSS发送消息"弹窗（避免遮罩挡住下个职位）
             await self._close_greet_dialog()
             # 关闭后可能再弹温馨提示，再处理一次
             limit = await self._handle_limit_popup()
             if limit == "exhausted":
                 return "limit_exhausted"
 
-            # 记录投递（打招呼语已发送 = 完成投递）
+            # 记录投递（已确认打招呼语发送成功 = 完成投递）
             print(f"  ✅ [投递成功] {company} | {title}")
             record_application(self.applied_data, company, title, city)
             return "applied"
@@ -1716,6 +1792,7 @@ class BossZhipinAutomator:
                 print(f"  ⚠️ 滚动加载后仍无职位")
             else:
                 print(f"  📋 共找到 {len(jobs)} 个职位（已滚动加载全部），逐个检查...")
+                verified_count = 0  # 本城已去消息页核验的成功投递数（前3个核验）
                 for job in jobs:
                     status = await self.apply_to_job(job, city)
                     stat["checked"] += 1
@@ -1723,6 +1800,16 @@ class BossZhipinAutomator:
                         stat[status] += 1
                     # 断点续跑：记录此职位已处理（含判断完跳过的），落盘
                     self._mark_processed(job.get("company", ""), job.get("title", ""), city, status)
+                    # 每个城市前 3 个【投递成功】的，去消息页核验确实发了招呼（用户要求）
+                    if status == "applied" and verified_count < 3:
+                        verified_count += 1
+                        print(f"     🔍 第 {verified_count}/3 个成功投递，去消息页核验...", flush=True)
+                        await self._verify_greet_in_messages(job.get("company", ""), job.get("title", ""))
+                        # 核验开了新标签页/可能切走焦点，回到列表页确保后续点击正常
+                        try:
+                            await self.page.bring_to_front()
+                        except Exception:
+                            pass
                     # 实时累计进度提示
                     skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
                     print(f"     ▸ [{city}] 进度：检查 {stat['checked']}/{len(jobs)} | "
