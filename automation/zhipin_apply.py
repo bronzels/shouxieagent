@@ -356,10 +356,15 @@ def image_to_base64(image_path: str) -> str:
 
 
 async def screenshot_page(page: Page, filename: str) -> str:
-    """截图当前页面，返回文件路径"""
+    """截图当前页面，返回文件路径。截图是非关键操作：超时/失败只告警，绝不抛异常
+    （曾因 page.screenshot 超时 30s 抛错冲垮整个多城市 run）。"""
     path = str(SCREENSHOTS_DIR / filename)
-    await page.screenshot(path=path, full_page=False)
-    return path
+    try:
+        await page.screenshot(path=path, full_page=False, timeout=8000)
+        return path
+    except Exception as e:
+        print(f"  [WARN] 截图失败(忽略): {filename} - {str(e)[:50]}", flush=True)
+        return ""
 
 
 # ─── OpenRouter API 调用 ──────────────────────────────────────────────────────
@@ -1619,15 +1624,28 @@ class BossZhipinAutomator:
         try:
             # 操作前守卫：检测到安全验证则暂停等用户处理（每个职位点击前都检测，避免空跑卡住）
             await self._check_anti_scrape()
+            # 点卡前先清理上一个职位发招呼后残留的遮罩弹窗（"温馨提示/还剩X次"、招呼确认弹窗），
+            # 否则遮罩会盖住列表，导致后续所有卡片点击失败（实测：发招呼后整城连续失败的根因）。
+            pre_limit = await self._handle_limit_popup()
+            if pre_limit == "exhausted":
+                return "limit_exhausted"
+            await self._close_greet_dialog()
             # 点职位卡 → 详情面板（检查阶段，快速延迟）
             # ⚠️ 不能用 get_job_listings 时存下的 ElementHandle：Boss直聘 SPA 列表会持续
             # 重渲染（点开详情/轮询刷新），存的句柄会 detach（"Element is not attached"）。
             # 用 Playwright Locator（点击时才解析、自动重试/滚动），对重渲染免疫。
             clicked = await self._click_card_by_text(title, company)
             if not clicked:
-                # 可能是验证页挡住了列表：再检测一次，若是验证则等用户处理后让上层重试
+                # 点击失败兜底：先清遮罩/查验证/查次数用完，再重试一次点击
                 if await self._check_anti_scrape():
                     return "fail"
+                lim2 = await self._handle_limit_popup()
+                if lim2 == "exhausted":
+                    return "limit_exhausted"
+                await self._close_greet_dialog()
+                human_delay(0.5, 1.0)
+                clicked = await self._click_card_by_text(title, company)
+            if not clicked:
                 print(f"  [WARN] 未能定位/点击职位卡，跳过: {company} | {title}")
                 return "fail"
             human_delay(CARD_DELAY_MIN, CARD_DELAY_MAX)
@@ -1869,9 +1887,14 @@ class BossZhipinAutomator:
                 city_stats = []
                 for i, city in enumerate(cities):
                     print(f"\n[{i+1}/{len(cities)}] ▶▶▶ 切换到城市: {city}")
-                    st = await self.process_city(city)
-                    if st:
-                        city_stats.append(st)
+                    # 单城异常不应冲垮整个多城市 run：捕获后继续下一城
+                    try:
+                        st = await self.process_city(city)
+                        if st:
+                            city_stats.append(st)
+                    except Exception as e:
+                        print(f"  [ERROR] 城市 [{city}] 处理异常，跳过该城继续: {str(e)[:80]}", flush=True)
+                        await self._check_anti_scrape()  # 异常可能因验证页，顺便检测
                     self._flush_checkpoint(city)  # 城市处理完落盘断点
 
                     if self.stop_requested:
