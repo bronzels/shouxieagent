@@ -1010,12 +1010,64 @@ class BossZhipinAutomator:
             pass
         return False
 
-    async def _check_anti_scrape(self) -> bool:
-        """每次关键操作前调用：检测安全验证；命中则①升级 slow 延迟档②停下提示用户手动处理。
+    async def _detect_access_restricted(self):
+        """检测【访问受限】硬封禁页（不同于可人工解的 Geetest 验证，这个只能等到恢复时间）。
 
-        返回 True 表示检测到验证并已暂停处理。实地验证确认：点击验证按钮会进入图标点选
-        图片题，无法可靠自动解（且运行时禁用多模态OCR）——所以一律交给用户手动完成。
+        实地页面文案：
+          访问受限 / 您的账户存在异常行为，已暂时被限制访问！
+          将于 2026-06-18 13:32 恢复正常 / 当前IP：xxx
+        返回 (restricted: bool, recover_time: str, current_ip: str)。
         """
+        try:
+            body = ""
+            try:
+                body = await self.page.evaluate("() => document.body ? document.body.innerText : ''")
+            except Exception:
+                body = ""
+            title = (await self.page.title()) or ""
+            hit = ("访问受限" in body or "访问受限" in title
+                   or "暂时被限制访问" in body or "您的账户存在异常行为" in body)
+            if not hit:
+                return False, "", ""
+            m = re.search(r"将于\s*([\d]{4}-[\d]{1,2}-[\d]{1,2}\s+[\d]{1,2}:[\d]{2})\s*恢复", body)
+            recover = m.group(1) if m else ""
+            mip = re.search(r"当前\s*IP\s*[:：]\s*([\d.]+)", body)
+            ip = mip.group(1) if mip else ""
+            return True, recover, ip
+        except Exception:
+            return False, "", ""
+
+    async def _check_anti_scrape(self) -> bool:
+        """每次关键操作前调用：检测反爬。两类：
+          A. 【访问受限】硬封禁（账号/IP 被限，给恢复时间）→ 打印恢复时间 + 停止运行(等不了)
+          B. 【安全验证】Geetest（可人工解）→ 升级 slow 档 + 暂停等用户手动完成
+
+        返回 True 表示检测到反爬（已处理：A 置停止标志 / B 已暂停）。
+        """
+        # A. 先查硬封禁（最优先：它无法人工解，只能等恢复时间）
+        restricted, recover, ip = await self._detect_access_restricted()
+        if restricted:
+            try:
+                await screenshot_page(self.page, "access_restricted.png")
+            except Exception:
+                pass
+            print("\n" + "🚫" * 30, flush=True)
+            print("  🚫 检测到【访问受限】——账号/IP 被 BOSS直聘 临时封禁（操作过于频繁）！", flush=True)
+            if recover:
+                print(f"  ⏰ 恢复时间：{recover}（下次请在此时间之后再重试）", flush=True)
+            else:
+                print("  ⏰ 恢复时间：页面未给出明确时间，建议隔天再试", flush=True)
+            if ip:
+                print(f"  🌐 当前被限 IP：{ip}", flush=True)
+            print("  🛑 已停止本次运行——封禁期间任何城市都返回空列表，继续跑无意义。", flush=True)
+            print("  💡 建议：到恢复时间后再跑；并用更慢档(--speed slow)、减少单次量、"
+                  "开 --verify-all(发完进消息窗口更拟人)降低再次触发概率。", flush=True)
+            print("🚫" * 30 + "\n", flush=True)
+            self.stop_requested = True       # 通知各处理循环停止
+            self.access_restricted_until = recover
+            return True
+
+        # B. Geetest 安全验证（可人工解）
         if not await self._detect_verify():
             return False
         # ① 操作太频繁触发反爬 → 自动升级到 slow 延迟档（若还不是）
@@ -1888,6 +1940,8 @@ class BossZhipinAutomator:
         await self._check_anti_scrape()
         if not await self.goto_list(city, 1):
             print(f"  ❌ 列表无职位，跳过城市: {city}")
+            # 0 职位常因【访问受限】硬封禁——检测封禁页并打印恢复时间+停止整轮
+            await self._check_anti_scrape()
         else:
             any_page_ok = True
             await screenshot_page(self.page, f"results_{city}.png")
