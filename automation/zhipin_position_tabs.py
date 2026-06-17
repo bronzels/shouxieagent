@@ -534,6 +534,8 @@ def _build_arg_parser():
                         help="操作延迟档位：normal(默认) | fast(快) | slow(慢/反爬)。触发安全验证会自动升 slow。")
     parser.add_argument("--allow-paid-fallback", action="store_true",
                         help="允许免费LLM/本地UI-TARS连续失败后升级到OpenRouter收费LLM/UI-TARS兜底。默认关。")
+    parser.add_argument("--proxy", default=None,
+                        help="访问 openrouter.ai 的代理(如 http://127.0.0.1:25378)。不传则自动从系统PAC检测。")
     return parser
 
 
@@ -544,6 +546,7 @@ def main():
 
     za.apply_speed_profile(args.speed)
     za.ALLOW_PAID_FALLBACK = args.allow_paid_fallback
+    za.setup_openrouter_proxy(args.proxy)
     print(f"⚙️ 操作延迟档位: {args.speed} | 收费兜底: {'开' if args.allow_paid_fallback else '关'}", flush=True)
 
     if args.openrouter_key:

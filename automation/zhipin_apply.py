@@ -41,6 +41,64 @@ import zhipin_status  # 对方回应状态过滤（所有 apply 任务共享）
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+# OpenRouter 走代理（国内访问 openrouter.ai 需科学上网）。httpx 默认【不走】Windows 系统
+# 代理/PAC，必须显式指定。None=不走代理；命令行 --proxy 覆盖；默认在 main 里自动从
+# Windows PAC/系统代理检测。本地 UI-TARS(LAN 192.168.x) 不走代理（用独立 OpenAI SDK）。
+OPENROUTER_PROXY = None
+
+
+def detect_system_proxy() -> str:
+    """自动检测可用于访问 openrouter.ai 的代理（返回 http://host:port 或 ""）。
+
+    顺序：① Windows PAC(AutoConfigURL) 里的 out_gfw_proxy/PROXY 项
+          ② Windows 系统代理 ProxyServer
+          ③ 常见本地端口探测
+    检测到后用 google/generate_204 验证能走通才返回。
+    """
+    candidates = []
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                           r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        try:
+            pac_url, _ = winreg.QueryValueEx(k, "AutoConfigURL")
+        except FileNotFoundError:
+            pac_url = ""
+        try:
+            proxy_server, _ = winreg.QueryValueEx(k, "ProxyServer")
+        except FileNotFoundError:
+            proxy_server = ""
+        winreg.CloseKey(k)
+        # PAC 里抽 PROXY host:port
+        if pac_url:
+            try:
+                txt = httpx.get(pac_url, timeout=6).text
+                for m in re.findall(r"PROXY\s+([\d.]+:\d+)", txt):
+                    candidates.append(m)
+            except Exception:
+                pass
+        if proxy_server:
+            # 形如 "127.0.0.1:7897" 或 "http=...;https=..."
+            for m in re.findall(r"([\d.]+:\d+)", proxy_server):
+                candidates.append(m)
+    except Exception:
+        pass
+    # 注：不写死任何代理地址。仅从系统 PAC/ProxyServer 读取（上面）。
+    # 要走代理请用命令行 --proxy http://host:port 显式指定。
+    seen = set()
+    for hp in candidates:
+        if hp in seen:
+            continue
+        seen.add(hp)
+        url = f"http://{hp}"
+        try:
+            r = httpx.get("https://www.google.com/generate_204", proxy=url, timeout=8)
+            if r.status_code in (204, 200):
+                return url
+        except Exception:
+            continue
+    return ""
+
 UITARS_MODEL = "bytedance/ui-tars-1.5-7b"
 
 # ─── UI-TARS 提供方式（由命令行参数在 main 中赋值，见文件末尾 argparse）──────────
@@ -397,7 +455,7 @@ async def _try_models_once(payload: dict, model_list: list) -> tuple:
             continue
         payload["model"] = m
         try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
+            async with httpx.AsyncClient(timeout=90.0, proxy=OPENROUTER_PROXY) as client:
                 resp = await client.post(
                     f"{OPENROUTER_BASE_URL}/chat/completions",
                     headers={
@@ -2035,7 +2093,28 @@ def _build_arg_parser():
         help="允许在免费 LLM / 本地 UI-TARS 连续失败后，升级到 OpenRouter 收费 LLM / "
              "OpenRouter UI-TARS 兜底。默认关闭（只用免费/本地）。",
     )
+    parser.add_argument(
+        "--proxy", default=None,
+        help="访问 openrouter.ai 用的代理（如 http://127.0.0.1:25378）。"
+             "不传则自动从 Windows PAC/系统代理检测。httpx 不走系统代理，必须显式指定。",
+    )
     return parser
+
+
+def setup_openrouter_proxy(arg_proxy):
+    """设置 OpenRouter 代理全局：命令行 > 自动检测。本地 UI-TARS(LAN) 不受影响。"""
+    global OPENROUTER_PROXY
+    if arg_proxy:
+        OPENROUTER_PROXY = arg_proxy
+        print(f"🌐 OpenRouter 代理（命令行指定）: {OPENROUTER_PROXY}", flush=True)
+    else:
+        print("🌐 自动检测 OpenRouter 代理...", flush=True)
+        OPENROUTER_PROXY = detect_system_proxy() or None
+        if OPENROUTER_PROXY:
+            print(f"🌐 OpenRouter 代理（自动检测）: {OPENROUTER_PROXY}", flush=True)
+        else:
+            print("🌐 未检测到可用代理，将直连 openrouter.ai（国内可能不通）", flush=True)
+    return OPENROUTER_PROXY
 
 
 def main():
@@ -2046,9 +2125,10 @@ def main():
     parser = _build_arg_parser()
     args = parser.parse_args()
 
-    # 延迟档位 + 收费兜底开关
+    # 延迟档位 + 收费兜底开关 + OpenRouter 代理
     apply_speed_profile(args.speed)
     ALLOW_PAID_FALLBACK = args.allow_paid_fallback
+    setup_openrouter_proxy(args.proxy)
     print(f"⚙️ 操作延迟档位: {args.speed} | 收费兜底: {'开' if ALLOW_PAID_FALLBACK else '关'}", flush=True)
 
     # OpenRouter key：命令行 > 环境变量/.env（保留现有回退方式）
