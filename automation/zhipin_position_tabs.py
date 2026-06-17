@@ -278,7 +278,13 @@ class PositionTabsAutomator(BossZhipinAutomator):
 
         # 实测：职位列表页顶部的求职期望 tab 是 a.expect-item，内含 span.text-content，
         # 文本形如「机器学习(深圳)」（带地点后缀），故用【子串】匹配 tab_name。
+        # ⚠️ tab 是异步渲染的：必须先等 a.expect-item 出现再查，否则会"选择器未命中"
+        # 退到不可靠的 UI-TARS 视觉点击（实测整轮 tab 抓 0 的根因就是没等渲染）。
         clicked = False
+        try:
+            await self.page.wait_for_selector("a.expect-item, .expect-item", timeout=12000)
+        except Exception:
+            print("  [WARN] 等待 expect-item tab 渲染超时，仍尝试查询")
         try:
             tabs = await self.page.query_selector_all("a.expect-item, .expect-item")
             for t in tabs:
