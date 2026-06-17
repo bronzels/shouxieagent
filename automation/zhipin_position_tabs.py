@@ -384,10 +384,12 @@ class PositionTabsAutomator(BossZhipinAutomator):
             if status in stat:
                 stat[status] += 1
             self._mark_processed(job.get("company", ""), job.get("title", ""), f"tab-{tab_name}", status)
-            # 每个 tab 前 3 个成功投递去消息页核验确实发了招呼（用户要求）
-            if status == "applied" and verified_count < 3:
+            # 投递成功后进消息窗口核验：--verify-all 开则每个都核验，否则每tab前3个
+            import zhipin_apply as _za
+            if status == "applied" and (_za.VERIFY_ALL_IN_MESSAGES or verified_count < 3):
                 verified_count += 1
-                print(f"     🔍 [tab {tab_name}] 第 {verified_count}/3 个成功投递，去消息页核验...", flush=True)
+                tag = "全部核验" if _za.VERIFY_ALL_IN_MESSAGES else f"第 {verified_count}/3"
+                print(f"     🔍 [tab {tab_name}] {tag} 成功投递，进消息窗口核验...", flush=True)
                 await self._verify_greet_in_messages(job.get("company", ""), job.get("title", ""))
                 try:
                     await self.page.bring_to_front()
@@ -536,6 +538,8 @@ def _build_arg_parser():
                         help="允许免费LLM/本地UI-TARS连续失败后升级到OpenRouter收费LLM/UI-TARS兜底。默认关。")
     parser.add_argument("--proxy", default=None,
                         help="访问 openrouter.ai 的代理(如 http://127.0.0.1:25378)。不传则自动从系统PAC检测。")
+    parser.add_argument("--verify-all", action="store_true",
+                        help="每个成功打招呼都进消息窗口核验(更稳更拟人,更慢)。默认只核验每tab前3个。")
     return parser
 
 
@@ -546,8 +550,10 @@ def main():
 
     za.apply_speed_profile(args.speed)
     za.ALLOW_PAID_FALLBACK = args.allow_paid_fallback
+    za.VERIFY_ALL_IN_MESSAGES = args.verify_all
     za.setup_openrouter_proxy(args.proxy)
-    print(f"⚙️ 操作延迟档位: {args.speed} | 收费兜底: {'开' if args.allow_paid_fallback else '关'}", flush=True)
+    print(f"⚙️ 操作延迟档位: {args.speed} | 收费兜底: {'开' if args.allow_paid_fallback else '关'}"
+          f" | 消息核验: {'全部' if args.verify_all else '前3'}", flush=True)
 
     if args.openrouter_key:
         za.OPENROUTER_API_KEY = args.openrouter_key

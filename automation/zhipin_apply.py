@@ -223,6 +223,10 @@ def apply_speed_profile(tier: str):
 # 打开后：免费 LLM 连续失败→升级收费 LLM；本地 UI-TARS 连续失败→切 OpenRouter UI-TARS。
 ALLOW_PAID_FALLBACK = False
 
+# 消息核验开关（命令行 --verify-all 打开；默认关=只核验每城/tab前3个）。
+# 打开后：【每个】成功打招呼都进消息窗口确认已发出（更稳，但更慢）。
+VERIFY_ALL_IN_MESSAGES = False
+
 # 城市完成标记按【日历日期】判断：同一天重跑跳过，不同日期（隔天）则重新处理
 
 # ─── 工具函数 ─────────────────────────────────────────────────────────────────
@@ -1535,43 +1539,69 @@ class BossZhipinAutomator:
         return False
 
     async def _verify_greet_in_messages(self, company: str, title: str) -> bool:
-        """去【消息】页核验确实给该 boss 发了招呼（每城前3个用，最终事实校验）。
+        """发完招呼后【在当前标签页进入消息窗口】，点开该 boss 的会话、停留浏览，确认招呼已发出。
 
-        独立开一个新标签页访问消息页，找最近会话核对公司名+是否有已发消息，
-        截图留证。不干扰主列表页。校验失败只告警+截图，不影响投递记录。
-        返回 True=核验到已发送，False=未核验到，None=核验过程异常。
+        这样做有两个目的：
+          1. 事实核验：在会话线程里确认刚发的招呼语确实存在（[送达]）。
+          2. 拟人化反爬：人发完招呼通常会进消息窗口看一眼；之前"发完立即关弹窗就投下一个、
+             从不进消息窗口"是机器人特征，可能触发反爬。现在主流程会真正进消息窗口浏览。
+
+        在主标签页操作（用户可观察）：进消息页→点会话→停留→截图→返回职位列表。
+        返回 True=核验到已发送，False=未核验到，None=异常。
+        失败不影响投递记录（招呼是否发出已由 _confirm_greet_sent 确认过）。
         """
-        vp = None
+        list_url = self.page.url  # 记下职位列表 URL，核验后返回
+        safe = re.sub(r"[^\w一-龥]", "_", f"{company}_{title}")[:40]
         try:
-            vp = await self.context.new_page()
-            await vp.goto("https://www.zhipin.com/web/geek/chat", wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(2.5)
-            info = await vp.evaluate(r"""(company) => {
-                const items=[...document.querySelectorAll('.user-list li, [class*="chat-list"] li, [role="listitem"]')];
-                const out={count:items.length, top:'', matched:false, hasMsg:false};
-                for(let i=0;i<Math.min(items.length,5);i++){
-                    const t=(items[i].textContent||'').trim();
-                    if(i===0) out.top=t.slice(0,60);
-                    if(company && t.includes(company.slice(0,4))){ out.matched=true; }
-                }
-                // 是否有"已发送/打招呼"等痕迹
-                out.hasMsg=/已发送|你好|您好|打招呼|请问|发简历|简历/.test(document.body.textContent||'');
-                return out;
-            }""", company)
-            safe = re.sub(r"[^\w一-龥]", "_", f"{company}_{title}")[:40]
-            await vp.screenshot(path=str(SCREENSHOTS_DIR / f"verify_msg_{safe}.png"))
-            ok = info.get("matched") or (info.get("count", 0) > 0 and info.get("hasMsg"))
-            mark = "✅ 已核验" if ok else "⚠️ 未核验到"
-            print(f"     🔍 [消息页核验] {mark}：会话数={info.get('count')} 顶部会话='{info.get('top')}' "
-                  f"匹配公司={info.get('matched')}（截图 verify_msg_{safe}.png）", flush=True)
+            # 进入消息窗口（像人一样）
+            await self.page.goto("https://www.zhipin.com/web/geek/chat",
+                                 wait_until="domcontentloaded", timeout=30000)
+            human_delay(1.5, 2.5)
+            # 找到匹配该公司的会话（找不到就用最顶部最新会话）并点开
+            convs = await self.page.query_selector_all(
+                ".user-list li, [class*='chat-list'] li, [role='listitem']")
+            target = None
+            for c in convs[:8]:
+                try:
+                    t = (await c.text_content() or "")
+                    if company and company[:4] in t:
+                        target = c
+                        break
+                except Exception:
+                    continue
+            if target is None and convs:
+                target = convs[0]  # 兜底：最顶部=刚发的最新会话
+            opened_text = ""
+            if target:
+                try:
+                    bb = await target.bounding_box()
+                    if bb:
+                        await human_mouse_move_and_click(
+                            self.page, int(bb["x"] + bb["width"] / 2), int(bb["y"] + bb["height"] / 2))
+                    else:
+                        await target.click()
+                except Exception:
+                    pass
+                human_delay(1.5, 2.8)  # 停留"阅读"会话线程（拟人）
+                # 读会话线程里我方发出的消息，确认招呼存在
+                opened_text = await self.page.evaluate(r"""() => {
+                    const area=document.querySelector("[class*='chat-conversation'], [class*='message-list'], .chat-message-list, .conversation-message");
+                    return ((area||document.body).textContent||'').slice(0,400);
+                }""")
+            await screenshot_page(self.page, f"verify_msg_{safe}.png")
+            ok = bool(re.search(r"请问贵公司的|还有空缺|您好|你好|已发送|\[送达\]|简历", opened_text or ""))
+            mark = "✅ 已核验(已进会话窗口)" if ok else "⚠️ 未核验到招呼文本"
+            print(f"     🔍 [消息窗口核验] {mark}：{company}（截图 verify_msg_{safe}.png）", flush=True)
             return ok
         except Exception as e:
-            print(f"     [WARN] 消息页核验异常: {str(e)[:60]}", flush=True)
+            print(f"     [WARN] 消息窗口核验异常: {str(e)[:60]}", flush=True)
             return None
         finally:
+            # 返回职位列表继续（核验在主页操作，必须回到列表 + 重新滚动加载）
             try:
-                if vp:
-                    await vp.close()
+                await self.page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
+                human_delay(1.0, 1.8)
+                await self._scroll_load_all_cards()
             except Exception:
                 pass
 
@@ -1876,10 +1906,11 @@ class BossZhipinAutomator:
                         stat[status] += 1
                     # 断点续跑：记录此职位已处理（含判断完跳过的），落盘
                     self._mark_processed(job.get("company", ""), job.get("title", ""), city, status)
-                    # 每个城市前 3 个【投递成功】的，去消息页核验确实发了招呼（用户要求）
-                    if status == "applied" and verified_count < 3:
+                    # 投递成功后进消息窗口核验：--verify-all 开则【每个】都核验，否则每城前3个
+                    if status == "applied" and (VERIFY_ALL_IN_MESSAGES or verified_count < 3):
                         verified_count += 1
-                        print(f"     🔍 第 {verified_count}/3 个成功投递，去消息页核验...", flush=True)
+                        tag = "全部核验" if VERIFY_ALL_IN_MESSAGES else f"第 {verified_count}/3"
+                        print(f"     🔍 {tag} 成功投递，进消息窗口核验...", flush=True)
                         await self._verify_greet_in_messages(job.get("company", ""), job.get("title", ""))
                         # 核验开了新标签页/可能切走焦点，回到列表页确保后续点击正常
                         try:
@@ -2098,6 +2129,10 @@ def _build_arg_parser():
         help="访问 openrouter.ai 用的代理（如 http://127.0.0.1:25378）。"
              "不传则自动从 Windows PAC/系统代理检测。httpx 不走系统代理，必须显式指定。",
     )
+    parser.add_argument(
+        "--verify-all", action="store_true",
+        help="每个成功打招呼都进消息窗口核验已发出（更稳更拟人，但更慢）。默认只核验每城前3个。",
+    )
     return parser
 
 
@@ -2120,16 +2155,18 @@ def setup_openrouter_proxy(arg_proxy):
 def main():
     """解析命令行参数，赋值到模块级全局变量后启动自动投递。"""
     global OPENROUTER_API_KEY, UITARS_PROVIDER, UITARS_ENDPOINT, UITARS_KEY, UITARS_LOCAL_URL, UITARS_LOCAL_MODEL
-    global ALLOW_PAID_FALLBACK
+    global ALLOW_PAID_FALLBACK, VERIFY_ALL_IN_MESSAGES
 
     parser = _build_arg_parser()
     args = parser.parse_args()
 
-    # 延迟档位 + 收费兜底开关 + OpenRouter 代理
+    # 延迟档位 + 收费兜底开关 + OpenRouter 代理 + 消息核验
     apply_speed_profile(args.speed)
     ALLOW_PAID_FALLBACK = args.allow_paid_fallback
+    VERIFY_ALL_IN_MESSAGES = args.verify_all
     setup_openrouter_proxy(args.proxy)
-    print(f"⚙️ 操作延迟档位: {args.speed} | 收费兜底: {'开' if ALLOW_PAID_FALLBACK else '关'}", flush=True)
+    print(f"⚙️ 操作延迟档位: {args.speed} | 收费兜底: {'开' if ALLOW_PAID_FALLBACK else '关'}"
+          f" | 消息核验: {'全部' if VERIFY_ALL_IN_MESSAGES else '每城前3'}", flush=True)
 
     # OpenRouter key：命令行 > 环境变量/.env（保留现有回退方式）
     if args.openrouter_key:
