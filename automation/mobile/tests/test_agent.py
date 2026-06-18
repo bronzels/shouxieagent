@@ -69,6 +69,49 @@ class XmlDevice(FakeDevice):
                 '</hierarchy>')
 
 
+class AdAppDevice(FakeDevice):
+    """模拟看完广告落在第三方广告 app：前几次 current_package 非酷狗，back 几次后回酷狗。"""
+    def __init__(self, backs_to_return=2):
+        super().__init__()
+        self._left = backs_to_return
+        self.backs = 0
+    def current_package(self):
+        return "com.kugou.android" if self._left <= 0 else "com.thirdparty.ad"
+    def back(self):
+        self.backs += 1
+        self._left -= 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_kugou_foreground_multi_back():
+    """看完广告在广告app里，多退几步直到回酷狗（不是退一步就算）。"""
+    dev = AdAppDevice(backs_to_return=3)
+    agent = KugouAdsAgent(device=dev, vision=FakeVision([0]), sleep=_no_sleep)
+    ok = await agent._ensure_kugou_foreground()
+    assert ok is True
+    assert dev.backs == 3          # 连退 3 次才回到酷狗
+
+
+@pytest.mark.asyncio
+async def test_ensure_kugou_foreground_activate_fallback():
+    """多次 back 仍回不去 → activate_app 兜底拉回。"""
+    class StuckDevice(FakeDevice):
+        def __init__(self):
+            super().__init__()
+            self._activated_to_kugou = False
+        def back(self): pass
+        def activate_app(self):
+            super().activate_app()
+            self._activated_to_kugou = True
+        def current_package(self):
+            return "com.kugou.android" if self._activated_to_kugou else "com.ad.app"
+    dev = StuckDevice()
+    agent = KugouAdsAgent(device=dev, vision=FakeVision([0]), sleep=_no_sleep)
+    ok = await agent._ensure_kugou_foreground(max_back=3)
+    assert ok is True
+    assert dev.activated >= 1       # 用了 activate 兜底
+
+
 @pytest.mark.asyncio
 async def test_xml_fallback_when_vision_blank():
     """UI-TARS 视觉全空时，回退到 page_source 关键字点击 + XML 时长解析仍能完成。"""

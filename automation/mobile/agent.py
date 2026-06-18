@@ -77,6 +77,22 @@ class KugouAdsAgent:
         return await self._locate_tap("点击右上角关闭广告的×按钮，或『领取奖励/完成』按钮",
                                       CLOSE_KEYWORDS)
 
+    def _in_kugou(self) -> bool:
+        return "kugou" in (self.dev.current_package() or "").lower()
+
+    async def _ensure_kugou_foreground(self, max_back: int = 5) -> bool:
+        """确保回到酷狗：看完广告常落地在第三方广告 app/夺宝页，单次 back 回不去。
+        连退多步(每步检查当前包)，仍不在酷狗则 activate_app 兜底拉回。"""
+        for _ in range(max_back):
+            if self._in_kugou():
+                return True
+            self.dev.back()
+            await self.sleep(1.2)
+        if not self._in_kugou():
+            self.dev.activate_app()   # 多次 back 仍回不去 → 直接拉起酷狗
+            await self.sleep(2.0)
+        return self._in_kugou()
+
     # ---- 兼容旧接口（单元测试用）----
     async def reset_to_kugou_home(self) -> None:
         self.dev.activate_app()
@@ -112,12 +128,15 @@ class KugouAdsAgent:
             return False
         secs = (d.get("seconds") or DEFAULT_AD_SECONDS)
         await self.sleep(secs + 3)        # 定时看够要求秒数(+缓冲)，不死等
+        ok = False
         for _ in range(4):                 # 关闭/领取，最多重试几次
             if await self._close_ad():
+                ok = True
                 await self.sleep(2.0)
-                return True
+                break
             await self.sleep(3.0)
-        return False
+        await self._ensure_kugou_foreground()   # 看完广告强制回酷狗，别留在广告app
+        return ok
 
     # ---- 感知-决策-执行主循环 ----
     async def run(self, target_minutes: int, max_ads: int) -> int:
@@ -141,16 +160,17 @@ class KugouAdsAgent:
                 if await self._locate_tap(f"点击『{label}』按钮看广告领免费听歌时长", WATCH_KEYWORDS):
                     await self.sleep(secs + 3)   # 定时看够，不死等
                     await self._close_ad()
+                    await self._ensure_kugou_foreground()   # 看完回酷狗
                     ads += 1
                 stale_home = 0
             elif act == "wait":
                 await self.sleep(5.0)
             elif act == "close":
                 await self._close_ad()
+                await self._ensure_kugou_foreground()
                 stale_home = 0
             elif act == "back":
-                self.dev.back()
-                await self.sleep(1.5)
+                await self._ensure_kugou_foreground()   # 多退几步直到回酷狗
                 stale_home = 0
             else:  # home / done：稳定页无可领入口 → 重启酷狗重新触发看广告领时长入口
                 stale_home += 1
