@@ -333,24 +333,16 @@ class LlmSzAutomator(BossZhipinAutomator):
                         print("  滚动加载后仍无职位")
                     else:
                         print(f"  共 {len(jobs)} 个职位（已滚动加载全部），逐个检查...")
-                        verified_count = 0  # 前3个成功投递去消息页核验
+                        verified_count = 0  # 前3个成功投递进聊天界面看一眼
                         for job in jobs:
-                            status = await self.apply_to_job(job, self.city)
+                            enter_chat = bool(za.VERIFY_ALL_IN_MESSAGES or verified_count < 3)
+                            status = await self.apply_to_job(job, self.city, enter_chat=enter_chat)
                             stat["checked"] += 1
                             if status in stat:
                                 stat[status] += 1
-                            self._mark_processed(job.get("company", ""), job.get("title", ""), self.city, status)
-                            # 投递成功后进消息窗口核验：--verify-all 开则每个都核验，否则前3个
-                            if status == "applied" and (za.VERIFY_ALL_IN_MESSAGES or verified_count < 3):
+                            if status == "applied" and enter_chat:
                                 verified_count += 1
-                                tag = "全部核验" if za.VERIFY_ALL_IN_MESSAGES else f"第 {verified_count}/3"
-                                print(f"     🔍 {tag} 成功投递，进消息窗口核验...", flush=True)
-                                await self._verify_greet_in_messages(
-                                    job.get("company", ""), job.get("title", ""))
-                                try:
-                                    await self.page.bring_to_front()
-                                except Exception:
-                                    pass
+                            self._mark_processed(job.get("company", ""), job.get("title", ""), self.city, status)
                             skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
                             print(f"     [进度] 检查 {stat['checked']}/{len(jobs)} | "
                                   f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")

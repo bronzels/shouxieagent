@@ -1649,72 +1649,49 @@ class BossZhipinAutomator:
             await asyncio.sleep(0.5)
         return False
 
-    async def _verify_greet_in_messages(self, company: str, title: str) -> bool:
-        """发完招呼后【在当前标签页进入消息窗口】，点开该 boss 的会话、停留浏览，确认招呼已发出。
+    async def _enter_chat_via_continue(self, safe: str) -> bool:
+        """发完招呼后，像真人一样点"已向BOSS发送消息"弹窗里的【继续沟通】进入聊天界面看一眼。
 
-        这样做有两个目的：
-          1. 事实核验：在会话线程里确认刚发的招呼语确实存在（[送达]）。
-          2. 拟人化反爬：人发完招呼通常会进消息窗口看一眼；之前"发完立即关弹窗就投下一个、
-             从不进消息窗口"是机器人特征，可能触发反爬。现在主流程会真正进消息窗口浏览。
+        实测：点"继续沟通"会跳转到 /web/geek/chat 聊天页，会话+刚发的招呼语就显示在里面
+        （类似微信聊天）。这是真人发完招呼的自然动作；之前"绕到消息列表找会话"舍近求远、
+        不像人。本方法只负责【进聊天页+停留浏览+确认招呼可见+截图】；返回职位列表由调用方做。
 
-        在主标签页操作（用户可观察）：进消息页→点会话→停留→截图→返回职位列表。
-        返回 True=核验到已发送，False=未核验到，None=异常。
-        失败不影响投递记录（招呼是否发出已由 _confirm_greet_sent 确认过）。
+        返回 True=进入聊天且看到招呼文本，False=没进去/没看到。
         """
-        list_url = self.page.url  # 记下职位列表 URL，核验后返回
-        safe = re.sub(r"[^\w一-龥]", "_", f"{company}_{title}")[:40]
         try:
-            # 进入消息窗口（像人一样）
-            await self.page.goto("https://www.zhipin.com/web/geek/chat",
-                                 wait_until="domcontentloaded", timeout=30000)
-            human_delay(1.5, 2.5)
-            # 找到匹配该公司的会话（找不到就用最顶部最新会话）并点开
-            convs = await self.page.query_selector_all(
-                ".user-list li, [class*='chat-list'] li, [role='listitem']")
-            target = None
-            for c in convs[:8]:
-                try:
-                    t = (await c.text_content() or "")
-                    if company and company[:4] in t:
-                        target = c
-                        break
-                except Exception:
-                    continue
-            if target is None and convs:
-                target = convs[0]  # 兜底：最顶部=刚发的最新会话
-            opened_text = ""
-            if target:
-                try:
-                    bb = await target.bounding_box()
-                    if bb:
-                        await human_mouse_move_and_click(
-                            self.page, int(bb["x"] + bb["width"] / 2), int(bb["y"] + bb["height"] / 2))
-                    else:
-                        await target.click()
-                except Exception:
-                    pass
-                human_delay(1.5, 2.8)  # 停留"阅读"会话线程（拟人）
-                # 读会话线程里我方发出的消息，确认招呼存在
-                opened_text = await self.page.evaluate(r"""() => {
-                    const area=document.querySelector("[class*='chat-conversation'], [class*='message-list'], .chat-message-list, .conversation-message");
-                    return ((area||document.body).textContent||'').slice(0,400);
-                }""")
-            await screenshot_page(self.page, f"verify_msg_{safe}.png")
-            ok = bool(re.search(r"请问贵公司的|还有空缺|您好|你好|已发送|\[送达\]|简历", opened_text or ""))
-            mark = "✅ 已核验(已进会话窗口)" if ok else "⚠️ 未核验到招呼文本"
-            print(f"     🔍 [消息窗口核验] {mark}：{company}（截图 verify_msg_{safe}.png）", flush=True)
-            return ok
-        except Exception as e:
-            print(f"     [WARN] 消息窗口核验异常: {str(e)[:60]}", flush=True)
-            return None
-        finally:
-            # 返回职位列表继续（核验在主页操作，必须回到列表 + 重新滚动加载）
+            cont = await self.page.query_selector(
+                ".greet-boss-dialog a:has-text('继续沟通'), "
+                ".greet-boss-dialog button:has-text('继续沟通'), "
+                "a:has-text('继续沟通')")
+            if not cont or not await cont.is_visible():
+                # 没有"继续沟通"按钮 → 关掉弹窗即可
+                await self._close_greet_dialog()
+                return False
+            bb = await cont.bounding_box()
+            if bb:
+                await human_mouse_move_and_click(
+                    self.page, int(bb["x"] + bb["width"] / 2), int(bb["y"] + bb["height"] / 2))
+            else:
+                await cont.click()
+            # 等进入聊天页
             try:
-                await self.page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
-                human_delay(1.0, 1.8)
-                await self._scroll_load_all_cards()
+                await self.page.wait_for_url("**/chat**", timeout=8000)
             except Exception:
                 pass
+            human_delay(2.0, 4.0)  # 在聊天界面"看一眼"（拟人停留）
+            ok = await self.page.evaluate(
+                r"""() => /请问贵公司的|还有空缺|已发送|\[送达\]/.test(document.body.textContent||'')""")
+            await screenshot_page(self.page, f"chat_{safe}.png")
+            print(f"     💬 已进入聊天界面查看{'（招呼已显示✓）' if ok else ''}（截图 chat_{safe}.png）",
+                  flush=True)
+            return bool(ok)
+        except Exception as e:
+            print(f"     [WARN] 进入聊天界面异常: {str(e)[:60]}", flush=True)
+            try:
+                await self._close_greet_dialog()
+            except Exception:
+                pass
+            return False
 
     async def _handle_limit_popup(self) -> str:
         """
@@ -1779,7 +1756,7 @@ class BossZhipinAutomator:
             print(f"  [WARN] 处理温馨提示弹窗出错: {e}", flush=True)
             return ""
 
-    async def apply_to_job(self, job: dict, city: str) -> str:
+    async def apply_to_job(self, job: dict, city: str, enter_chat: bool = False) -> str:
         """
         对单个职位投递（Boss直聘聊天式）。返回状态码用于统计：
           "applied"   —— 新投递成功
@@ -1791,6 +1768,7 @@ class BossZhipinAutomator:
         """
         company = job.get("company", "")
         title = job.get("title", "")
+        list_url = self.page.url  # 职位列表 URL（进聊天界面后需返回此处继续）
 
         # 断点续跑：本次/今天已处理过(判断过)的职位直接跳过，不重复点击/LLM判断
         if not hasattr(self, "_ckpt_processed"):
@@ -1953,16 +1931,26 @@ class BossZhipinAutomator:
                 await self._close_greet_dialog()
                 return "fail"
 
-            # 确认已发送 → 关闭"已向BOSS发送消息"弹窗（避免遮罩挡住下个职位）
-            await self._close_greet_dialog()
-            # 关闭后可能再弹温馨提示，再处理一次
-            limit = await self._handle_limit_popup()
-            if limit == "exhausted":
-                return "limit_exhausted"
-
             # 记录投递（已确认打招呼语发送成功 = 完成投递）
             print(f"  ✅ [投递成功] {company} | {title}")
             record_application(self.applied_data, company, title, city)
+
+            # 拟人 + 核验：像真人一样点弹窗"继续沟通"进入聊天界面看一眼（招呼就显示在会话里），
+            # 而不是绕到"消息"列表找会话（舍近求远、不像人）。看完导航回职位列表继续。
+            if enter_chat:
+                await self._enter_chat_via_continue(safe)
+                try:
+                    await self.page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
+                    human_delay(1.0, 1.8)
+                    await self._scroll_load_all_cards()
+                except Exception:
+                    pass
+            else:
+                # 不进聊天：关闭"已向BOSS发送消息"弹窗（避免遮罩挡住下个职位）
+                await self._close_greet_dialog()
+                limit = await self._handle_limit_popup()
+                if limit == "exhausted":
+                    return "limit_exhausted"
             return "applied"
 
         except Exception as e:
@@ -2016,23 +2004,16 @@ class BossZhipinAutomator:
                 print(f"  📋 共找到 {len(jobs)} 个职位（已滚动加载全部），逐个检查...")
                 verified_count = 0  # 本城已去消息页核验的成功投递数（前3个核验）
                 for job in jobs:
-                    status = await self.apply_to_job(job, city)
+                    # 投递成功后是否进聊天界面看一眼：--verify-all 开则每个都进，否则每城前3个
+                    enter_chat = bool(VERIFY_ALL_IN_MESSAGES or verified_count < 3)
+                    status = await self.apply_to_job(job, city, enter_chat=enter_chat)
                     stat["checked"] += 1
                     if status in stat:
                         stat[status] += 1
+                    if status == "applied" and enter_chat:
+                        verified_count += 1
                     # 断点续跑：记录此职位已处理（含判断完跳过的），落盘
                     self._mark_processed(job.get("company", ""), job.get("title", ""), city, status)
-                    # 投递成功后进消息窗口核验：--verify-all 开则【每个】都核验，否则每城前3个
-                    if status == "applied" and (VERIFY_ALL_IN_MESSAGES or verified_count < 3):
-                        verified_count += 1
-                        tag = "全部核验" if VERIFY_ALL_IN_MESSAGES else f"第 {verified_count}/3"
-                        print(f"     🔍 {tag} 成功投递，进消息窗口核验...", flush=True)
-                        await self._verify_greet_in_messages(job.get("company", ""), job.get("title", ""))
-                        # 核验开了新标签页/可能切走焦点，回到列表页确保后续点击正常
-                        try:
-                            await self.page.bring_to_front()
-                        except Exception:
-                            pass
                     # 实时累计进度提示
                     skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
                     print(f"     ▸ [{city}] 进度：检查 {stat['checked']}/{len(jobs)} | "

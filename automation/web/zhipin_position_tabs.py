@@ -375,26 +375,17 @@ class PositionTabsAutomator(BossZhipinAutomator):
             return stat
 
         print(f"  tab【{tab_name}】共 {len(jobs)} 个职位，逐个检查...")
-        verified_count = 0  # 每个 tab 前3个成功投递去消息页核验
+        import zhipin_apply as _za
+        verified_count = 0  # 每个 tab 前3个成功投递进聊天界面看一眼
         for job in jobs:
-            # apply_to_job 会调用 self.verify_fn（即 _verify_mixed_no_location）
-            # _verify_mixed_no_location 根据标题+描述中的关键字判断远程/深圳路径
-            status = await self.apply_to_job(job, f"tab-{tab_name}")
+            enter_chat = bool(_za.VERIFY_ALL_IN_MESSAGES or verified_count < 3)
+            status = await self.apply_to_job(job, f"tab-{tab_name}", enter_chat=enter_chat)
             stat["checked"] += 1
             if status in stat:
                 stat[status] += 1
-            self._mark_processed(job.get("company", ""), job.get("title", ""), f"tab-{tab_name}", status)
-            # 投递成功后进消息窗口核验：--verify-all 开则每个都核验，否则每tab前3个
-            import zhipin_apply as _za
-            if status == "applied" and (_za.VERIFY_ALL_IN_MESSAGES or verified_count < 3):
+            if status == "applied" and enter_chat:
                 verified_count += 1
-                tag = "全部核验" if _za.VERIFY_ALL_IN_MESSAGES else f"第 {verified_count}/3"
-                print(f"     🔍 [tab {tab_name}] {tag} 成功投递，进消息窗口核验...", flush=True)
-                await self._verify_greet_in_messages(job.get("company", ""), job.get("title", ""))
-                try:
-                    await self.page.bring_to_front()
-                except Exception:
-                    pass
+            self._mark_processed(job.get("company", ""), job.get("title", ""), f"tab-{tab_name}", status)
             skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
             print(f"     [tab {tab_name}] 检查 {stat['checked']} | "
                   f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")
