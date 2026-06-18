@@ -25,6 +25,11 @@ def test_parse_zero_or_expired():
 def test_parse_none_when_no_number():
     assert parse_duration_to_minutes("看广告领时长") is None
 
+def test_parse_kugou_min_sec_colon():
+    # 酷狗免费听歌剩余时长格式「分:秒」
+    assert parse_duration_to_minutes("免费畅听剩余时长 580:57") == 580
+    assert parse_duration_to_minutes("剩余 45:30") == 45
+
 def test_norm_to_pixel():
     assert norm_to_pixel(0.5, 0.5, 1080, 2400) == (540, 1200)
 

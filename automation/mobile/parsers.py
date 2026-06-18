@@ -22,6 +22,10 @@ def parse_duration_to_minutes(text: str) -> int | None:
     m = re.search(r"(\d+)\s*(?:分钟|分|m)\b", text)
     if m:
         return int(m.group(1))
+    # 酷狗免费听歌剩余时长显示为「分:秒」(如 580:57)，取冒号前为分钟数
+    m = re.search(r"\b(\d+)\s*[:：]\s*[0-5]?\d\b", text)
+    if m:
+        return int(m.group(1))
     # 仅一个数字（兜底，按分钟）
     m = re.search(r"(\d+)", text)
     if m:
