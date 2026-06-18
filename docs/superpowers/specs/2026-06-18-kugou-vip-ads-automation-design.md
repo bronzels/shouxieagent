@@ -11,11 +11,12 @@
 - 手机：Android 真机，已 USB 连接、已开启 USB 调试，adb 可识别。
 - 酷狗音乐：已安装、已登录可领 VIP 的账号。包名预期 `com.kugou.android`（运行时以 adb 实测为准）。
 - 单次广告时长 **≤ 60 秒**；**无累计上限**，14 小时目标可达。
-- GUI 识别（看截图找按钮 / 读屏文字）复用 `automation/web` 已有能力：
-  - **默认**：本地 UI-TARS（`http://192.168.3.14:8000/v1`，OpenAI 兼容）做坐标 grounding；
-  - **决策/读屏文字**：OpenRouter 免费文本/多模态模型链；
-  - **fallback**：本地 UI-TARS 连续失败 → OpenRouter 上的 UI-TARS / 免费多模态模型。
-  - 复用函数来自 `automation/web/zhipin_apply.py`：`call_uitars()`、`parse_uitars_action()`（输出 0-1 归一化坐标）、`_post_openrouter()`、模型清单 `VERIFY_MODELS_TEXT/_MULTIMODAL(_PAID)`、`UITARS_LOCAL_URL`。
+- GUI 识别：**只用 UI-TARS 这一类 GUI grounding 模型**，不引入独立文字大模型。
+  - 本任务无需理解大段文字（这是 web 投简历任务才需要、才借鉴文字模型的；本任务只是点按钮 + 读一小段时长），因此**不照搬 web 的 OpenRouter 文字/多模态模型链**（`VERIFY_MODELS_*`）。借鉴的是「截图→定位→点击」骨架，而非全盘复制。
+  - **点击定位**：本地 UI-TARS（`http://192.168.3.14:8000/v1`，OpenAI 兼容）做坐标 grounding。
+  - **读 VIP 剩余时长**：首选从 page_source（UiAutomator2 无障碍树 XML）的 `text` 属性直接取，**零模型、精确**；拿不到时（自绘 View/WebView 不暴露文字）才回退给同一本地 UI-TARS 发「读出图中剩余时长」的 OCR 问题（UI-TARS 基于 Qwen2.5-VL，可读字，仍属同类模型）。
+  - **fallback**：本地 UI-TARS 不可达 → OpenRouter 上的同款 `bytedance/ui-tars-1.5-7b`（同模型换托管，不是换成文字模型）。
+  - 借鉴的函数骨架来自 `automation/web/zhipin_apply.py`：`call_uitars()`、`parse_uitars_action()`（输出 0-1 归一化坐标）、本地 server 调用方式、`UITARS_LOCAL_URL`。
 - 遵守 `AGENTS.md`：隔离环境（测试代码跑在根目录 `.venv`）、TDD 铁律、测试前后清理数据、中文输出、任务完成 git commit/push。
 
 ---
@@ -42,10 +43,10 @@
   - `screenshot(path)`、`tap(x, y)`、`tap_norm(nx, ny)`（0-1 归一化 → 像素）、`swipe(...)`、`back()`
   - `page_source()` 取 XML、`find_by_text(substr)` / `find_by_resource_id(rid)`
   - `activate_app(pkg)`、`current_activity()`、`screen_size()`
-- **`vision.py`** — 复用 web 的视觉/LLM 能力（同款模型链 + `192.168.3.14` 本地 UI-TARS）：
-  - `locate(screenshot_path, 指令) -> (nx, ny) | None`：本地 UI-TARS 出坐标，失败 fallback；底层调 `call_uitars` + `parse_uitars_action`
-  - `read_text(screenshot_path, 问题) -> str`：免费文本/多模态模型读屏（如读 VIP 剩余时长、判断当前在哪个页面、广告是否结束）
-  - 复用策略：以 `sys.path` 注入 `automation/web` 后 import，或抽出公共函数到 `vision.py` 直接调用（实现阶段二选一，以不改动 web 现有行为为准）。
+- **`vision.py`** — 只封装 UI-TARS（本地优先 + OpenRouter 同款 fallback），自包含复刻 web 的调用骨架（不 import zhipin_apply，避免 pyautogui/playwright 依赖）：
+  - `locate(screenshot_path, 指令, w, h) -> (px, py) | None`：本地 UI-TARS 出归一化坐标 → 像素，失败 fallback OpenRouter 同款 ui-tars；底层调 `call_uitars` + 坐标解析。
+  - `read_text(screenshot_path, 问题) -> str`：**UI-TARS OCR 兜底**（仅当 page_source 拿不到时长文字才用），给本地 UI-TARS 发普通 OCR 问题；不使用独立文字/多模态模型链。
+  - 读 VIP 时长的**首选路径不在 vision.py**，而在 `agent` 直接读 page_source XML（见 §4.4）。
 - **`agent.py`** — 主循环（鲁棒性核心，见 §4）。
 - **`kugou_vip_ads.py`** — CLI 入口。参数：
   - `--target-hours`（默认 14）
@@ -64,7 +65,7 @@
    - 点「看广告」按钮 → 进入广告（≤60 秒）。
    - 轮询截图判断广告进行中/结束；广告结束后定位右上角关闭「×」（视觉定位优先，结合 page source）→ 关闭回到奖励页。
    - 处理「广告加载失败 / 无广告可看 / 弹窗」等异常：重试或返回奖励页。
-4. **读时长 & 停止条件**：每轮读页面显示的「VIP / 免费畅听剩余时长」，`read_text` + 解析成分钟。**累计剩余时长 ≥ 14 小时即停**。达到 `--max-ads` 安全上限也停（打印告警，说明被安全上限截断）。
+4. **读时长 & 停止条件**：每轮读页面显示的「VIP / 免费畅听剩余时长」——**首选直接扫 page_source XML 的 `text` 节点**（零模型、精确），用 `parse_duration_to_minutes` 解析；XML 取不到才回退 `vision.read_text`（UI-TARS OCR）。**剩余时长 ≥ 14 小时即停**。达到 `--max-ads` 安全上限也停（打印告警，说明被安全上限截断）。
 5. **可观测性**：关键节点存截图到 `automation/mobile/reports/screenshots/`；每轮打印当前剩余时长进度。
 
 ---
