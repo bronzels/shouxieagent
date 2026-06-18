@@ -45,15 +45,15 @@ automation/desktop/
 └── runs/<时间戳>/         # 每次运行留档（每步截图）
 ```
 
-**复用 `automation/web` 既有资产（不重写）：**
+**复用 `automation/` 既有资产（不重写）：**
 
-- `automation/web/ui-tars-server/inference_client.py` 的 `UITarsClient`：
+- `automation/ui-tars-server/inference_client.py` 的 `UITarsClient`：
   - `local()` / `openrouter()` 工厂方法（本地优先 + OpenRouter 兜底）
   - `predict()` / `ground()` / `append_history()`（多轮对话历史，agent 循环必备）
   - 内置 `MOBILE_SYSTEM_PROMPT`（含 `press_home`/`press_back`/`long_press`/`scroll`）
   - `parse_action_simple()`（0–1000 相对坐标 → 像素归一化）
   - 官方参数 `frequency_penalty=1, temperature=0`
-- `automation/web/inference.py`：需在本地起 UI-TARS OpenAI 兼容服务时使用。
+- `automation/inference.py`：需在本地起 UI-TARS OpenAI 兼容服务时使用。
 - OpenRouter 走代理的 env 模式。
 
 `uitars_agent` 逻辑以薄封装方式复用 `UITarsClient`，不重写。
