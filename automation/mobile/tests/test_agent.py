@@ -32,6 +32,8 @@ class FakeVision:
         self.read_calls = 0
     async def locate(self, image_path, instruction, w, h): return (50, 50)
     async def read_text(self, image_path, question):
+        if "已用完" in question or "开通会员" in question:  # _is_exhausted → 未用完
+            return "否"
         if "主页" in question:          # _on_kugou_home 校验 → 视为已在主页
             return "是"
         if "任务中心" in question:      # _on_ads_center 校验 → 视为已在中心
@@ -127,6 +129,34 @@ async def test_xml_fallback_when_vision_blank():
     final = await agent.run(target_minutes=840, max_ads=50)
     assert final >= 840          # 经 XML 兜底读到 900 分钟
     assert dev.taps               # 经 page_source 关键字命中点击过
+
+
+class ExhaustedVision:
+    """模拟一进循环就检测到『今日免费机会已用完』弹窗。"""
+    async def locate(self, image_path, instruction, w, h): return (50, 50)
+    async def read_text(self, image_path, question):
+        if "已用完" in question or "开通会员" in question:
+            return "是"          # 今日已用完
+        if "主页" in question or "任务中心" in question:
+            return "是"
+        return "剩余100分钟"
+
+
+@pytest.mark.asyncio
+async def test_is_exhausted_detects_popup():
+    dev = FakeDevice()
+    agent = KugouAdsAgent(device=dev, vision=ExhaustedVision(), sleep=_no_sleep)
+    assert await agent._is_exhausted() is True
+
+
+@pytest.mark.asyncio
+async def test_run_stops_when_daily_exhausted():
+    """检测到『今日免费机会已用完』时立即停止(不看广告、不点立即开通)。"""
+    dev = FakeDevice()
+    agent = KugouAdsAgent(device=dev, vision=ExhaustedVision(), sleep=_no_sleep)
+    final = await agent.run(target_minutes=99999, max_ads=50)
+    # 一进循环就判定用完 → 没看广告，时长停在初始读数(100)，不会刷到目标
+    assert final == 100
 
 
 class GiveupVision:

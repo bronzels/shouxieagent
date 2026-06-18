@@ -30,6 +30,10 @@ CENTER_QUESTION = (
 HOME_QUESTION = (
     "这个页面是不是酷狗音乐的主页(顶部有搜索框、右边有蓝色『免』图标，底部导航『首页』高亮)？"
     "如果是排行榜/搜索/歌单/详情等带左上角『<』返回箭头的子页面就回答『否』。只回答『是』或『否』。")
+# 检测『今日免费(看广告领时长)机会已用完』——只能付费开通、无法再免费领，应提示用户并退出
+EXHAUSTED_QUESTION = (
+    "屏幕上是否出现『今日免费机会已用完』『今日免费听歌次数已用完』『开通会员畅听』"
+    "这类提示(意思是今天免费看广告领时长的机会已用完，只能花钱开通会员)？只回答『是』或『否』。")
 REMAIN_QUESTION = (
     "这个页面顶部『免费畅听剩余时长』显示的数字是多少？它的格式是 分:秒"
     "（例如 533:23 表示还剩 533 分钟 23 秒）。请把这个数字原样回答，如『533:23』，"
@@ -170,6 +174,11 @@ class KugouAdsAgent:
         ans = await self.vis.read_text(self._shot(), HOME_QUESTION)
         return ("是" in ans) and ("否" not in ans) and ("不是" not in ans)
 
+    async def _is_exhausted(self) -> bool:
+        """是否弹出『今日免费机会已用完/开通会员畅听』——今天无法再免费领时长。"""
+        ans = await self.vis.read_text(self._shot(), EXHAUSTED_QUESTION)
+        return ("是" in ans) and ("否" not in ans) and ("不是" not in ans)
+
     async def _try_claim_reward(self) -> bool:
         """批量模式累计够条数后，页面会出现『领取/领取奖励/领时长』按钮 → 点它领奖。
         没有可领的就什么都不做（返回 False）。仅当 UI-TARS 明确看到领取按钮才点。"""
@@ -308,8 +317,13 @@ class KugouAdsAgent:
         steps = 0
         max_steps = max(30, max_ads * 6)
         stale_home = 0   # 连续 home/done 次数，过多则重启换状态
+        exhausted = False
         while remaining < target_minutes and ads < max_ads and steps < max_steps:
             steps += 1
+            # 今日免费机会用完检测：弹出『今日已用完/开通会员』就停止(绝不点立即开通付费)
+            if await self._is_exhausted():
+                exhausted = True
+                break
             decision = await self._decide()
             act = decision["action"]
             print(f"  · step{steps}: {act} (label={decision.get('label','')}) | {decision.get('_raw','')}",
@@ -365,7 +379,10 @@ class KugouAdsAgent:
             if not await self._on_ads_center():
                 print("    (检测到不在中心页，尝试返回回到免费听歌中心)", flush=True)
                 await self._recover_to_center()
-        if remaining >= target_minutes:
+        if exhausted:
+            print(f"  🛑 今日免费看广告领时长的机会已用完，无法继续领取(不会点付费开通)。"
+                  f"当前剩余 {remaining} 分钟，请明日再运行。", flush=True)
+        elif remaining >= target_minutes:
             print(f"  ✅ 已达目标，最终剩余 {remaining} 分钟 (≥{target_minutes})", flush=True)
         else:
             print(f"  ⚠️ 停止：剩余 {remaining} 分钟 (看了 {ads} 次广告，{steps} 步)", flush=True)
