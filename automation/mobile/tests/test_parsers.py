@@ -3,7 +3,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from parsers import (parse_duration_to_minutes, norm_to_pixel,
-                     find_keyword_bounds, extract_duration_from_xml)
+                     find_keyword_bounds, extract_duration_from_xml, decide_action,
+                     parse_required_seconds)
 
 
 def test_parse_hours_and_minutes():
@@ -45,3 +46,27 @@ def test_extract_duration_from_xml_hit():
 def test_extract_duration_from_xml_miss():
     xml = '<hierarchy><node text="看广告领时长" bounds="[0,0][10,10]"/></hierarchy>'
     assert extract_duration_from_xml(xml) is None
+
+def test_parse_required_seconds():
+    assert parse_required_seconds("点击广告浏览15秒,即可领取") == 15
+    assert parse_required_seconds("看 30 秒可得奖励") == 30
+    assert parse_required_seconds("免费领取") is None
+
+def test_decide_action_tap_entry():
+    assert decide_action("弹窗里有一个蓝色按钮『点击去浏览』看广告领30分钟")["action"] == "tap"
+
+def test_decide_action_wait_ad():
+    assert decide_action("正在播放广告，右上角倒计时5秒")["action"] == "wait"
+
+def test_decide_action_back_distraction():
+    assert decide_action("这是酷狗内测版邀请页面，有立即升级按钮")["action"] == "back"
+
+def test_decide_action_close_reward():
+    assert decide_action("恭喜你已获得30分钟免费听歌奖励")["action"] == "close"
+
+def test_decide_action_done_home():
+    assert decide_action("这是酷狗主页推荐页，底部有乐库电台")["action"] == "done"
+
+def test_parse_required_seconds_via_parse_required():
+    from parsers import parse_required_seconds as prs
+    assert prs("浏览15秒即可领取") == 15
