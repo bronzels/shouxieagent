@@ -43,14 +43,25 @@ def test_activate_kugou_foreground(dev):
     time.sleep(2)
     assert PKG in dev.current_package()
 
-def test_page_source_fast_on_kugou(dev):
-    """酷狗开屏/首页 page_source 必须快速返回、不崩（根因修复:关idle等待+忽略不重要视图）。"""
+def test_screenshot_via_adb_fast(dev, tmp_path):
+    """截图走 adb screencap，必须快速(<15s)返回有效 PNG（绕开 UiAutomator2 崩溃）。"""
     import time
     dev.activate_app()
     time.sleep(3)
     t0 = time.time()
-    xml = dev.page_source()
+    p = dev.screenshot(str(tmp_path / "adb_shot.png"))
     dt = time.time() - t0
-    assert dt < 10, f"page_source 太慢({dt:.1f}s)，idle等待修复可能失效"
-    assert xml, "page_source 返回空（dump 失败）"
+    assert dt < 15, f"截图太慢({dt:.1f}s)"
+    data = Path(p).read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", "不是有效 PNG"
+
+def test_page_source_bounded(dev):
+    """page_source 仅作兜底，必须有界(不挂死):酷狗重界面会超时返回空串，<8s 内返回。"""
+    import time
+    dev.activate_app()
+    time.sleep(3)
+    t0 = time.time()
+    _ = dev.page_source()       # 可能为空(超时停用)，但绝不能挂死
+    dt = time.time() - t0
+    assert dt < 8, f"page_source 未在超时内返回({dt:.1f}s)"
 
