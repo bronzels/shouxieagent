@@ -1031,7 +1031,12 @@ def _build_arg_parser():
     )
     parser.add_argument(
         "--uitars-local-url", default=za.UITARS_LOCAL_URL,
-        help="local 方式下本地 UI-TARS 推理服务地址（OpenAI 兼容），当前未实现，仅占位。",
+        help="local 方式下本地 UI-TARS 推理服务地址（OpenAI 兼容），如 http://192.168.3.14:8000/v1。",
+    )
+    parser.add_argument(
+        "--proxy", default=None,
+        help="访问 openrouter.ai 的代理(如 http://127.0.0.1:25378)。分类回复需调 OpenRouter。"
+             "不传则自动从系统 PAC 检测。",
     )
     return parser
 
@@ -1045,6 +1050,9 @@ def main():
     # 这样 _post_openrouter / call_uitars 都会用到最新 key）
     if args.openrouter_key:
         za.OPENROUTER_API_KEY = args.openrouter_key
+
+    # OpenRouter 代理（分类回复要调 OpenRouter；httpx 不走系统代理，必须显式设置）
+    za.setup_openrouter_proxy(args.proxy)
 
     # UI-TARS 提供方式：直接写入 za 的全局，复用其 call_uitars 分发逻辑
     za.UITARS_PROVIDER = args.uitars_provider
