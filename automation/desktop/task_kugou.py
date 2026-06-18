@@ -20,13 +20,15 @@ INSTRUCTIONS = {
 
 
 class KugouTask:
-    def __init__(self, window, agent, inp, target_hours=14, max_rounds=200, stale_limit=4):
+    def __init__(self, window, agent, inp, target_hours=14, max_rounds=200,
+                 stale_limit=4, max_grounding_retries=3):
         self.window = window
         self.agent = agent
         self.inp = inp
         self.target_hours = target_hours
         self.max_rounds = max_rounds
         self.stale_limit = stale_limit
+        self.max_grounding_retries = max_grounding_retries
         self.INSTRUCTIONS = INSTRUCTIONS
 
     @staticmethod
@@ -54,7 +56,7 @@ class KugouTask:
 
             if action is None:
                 fail_streak += 1
-                if fail_streak >= 3:
+                if fail_streak >= self.max_grounding_retries:
                     return {"status": "failed", "rounds": rounds}
                 continue
             fail_streak = 0

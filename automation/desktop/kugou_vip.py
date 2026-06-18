@@ -17,6 +17,8 @@ def build_task(args):
         window, agent, inp,
         target_hours=args.target_hours,
         max_rounds=args.max_rounds,
+        stale_limit=args.stale_limit,
+        max_grounding_retries=args.max_grounding_retries,
     )
 
 

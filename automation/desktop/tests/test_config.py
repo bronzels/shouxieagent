@@ -21,3 +21,30 @@ def test_parse_args_overrides_target_hours():
 def test_parse_args_dry_run_flag():
     ns = config.parse_args(["--dry-run"])
     assert ns.dry_run is True
+
+
+# ── M3 配置接线测试 ───────────────────────────────────────────────────────────
+
+def test_defaults_stale_limit_and_max_grounding_retries():
+    assert config.DEFAULTS["stale_limit"] == 4
+    assert config.DEFAULTS["max_grounding_retries"] == 3
+
+
+def test_parse_args_stale_limit_default():
+    ns = config.parse_args([])
+    assert ns.stale_limit == 4
+
+
+def test_parse_args_max_grounding_retries_default():
+    ns = config.parse_args([])
+    assert ns.max_grounding_retries == 3
+
+
+def test_parse_args_stale_limit_override():
+    ns = config.parse_args(["--stale-limit", "6"])
+    assert ns.stale_limit == 6
+
+
+def test_parse_args_max_grounding_retries_override():
+    ns = config.parse_args(["--max-grounding-retries", "5"])
+    assert ns.max_grounding_retries == 5

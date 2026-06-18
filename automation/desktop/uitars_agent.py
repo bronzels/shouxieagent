@@ -7,7 +7,10 @@ from pathlib import Path
 _UITARS_DIR = Path(__file__).resolve().parents[1] / "ui-tars-server"
 if str(_UITARS_DIR) not in sys.path:
     sys.path.insert(0, str(_UITARS_DIR))
-from inference_client import UITarsClient, parse_action_simple  # noqa: E402
+from inference_client import (  # noqa: E402
+    UITarsClient, parse_action_simple, MOBILE_SYSTEM_PROMPT,
+    encode_image, add_box_token,
+)
 
 
 class UITarsAgent:
@@ -26,9 +29,7 @@ class UITarsAgent:
             return None
         # 维护 history（供下一轮上下文）
         try:
-            client = self._last_client
-            self.history = client.append_history(self.history, raw, screenshot) \
-                if self.history else self._init_history(instruction, raw, screenshot, client)
+            self._record_turn(instruction, raw, screenshot)
         except Exception:
             pass
         return parse_action_simple(raw, w, h)
@@ -50,7 +51,20 @@ class UITarsAgent:
             except Exception:
                 return None
 
-    @staticmethod
-    def _init_history(instruction, raw, screenshot, client):
-        # 首轮：构造一个最小 history 起点
-        return client.append_history([], raw, screenshot)
+    def _record_turn(self, instruction, raw, screenshot):
+        """把本轮发送的 user 消息 + assistant 回复追加到 history，
+        使 history 与 predict() 实际发送的 messages 序列一致。"""
+        img_b64 = encode_image(screenshot)
+        image_part = {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+        }
+        if not self.history:
+            user_msg = {"role": "user", "content": [
+                {"type": "text", "text": MOBILE_SYSTEM_PROMPT + instruction},
+                image_part,
+            ]}
+        else:
+            user_msg = {"role": "user", "content": [image_part]}
+        self.history.append(user_msg)
+        self.history.append({"role": "assistant", "content": add_box_token(raw)})

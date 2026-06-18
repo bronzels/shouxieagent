@@ -28,4 +28,6 @@ def parse_args(argv=None):
     p.add_argument("--local-url", default=DEFAULTS["local_url"])
     p.add_argument("--openrouter-key", default=DEFAULTS["openrouter_key"])
     p.add_argument("--dry-run", action="store_true", default=DEFAULTS["dry_run"])
+    p.add_argument("--stale-limit", type=int, default=DEFAULTS["stale_limit"])
+    p.add_argument("--max-grounding-retries", type=int, default=DEFAULTS["max_grounding_retries"])
     return p.parse_args(argv)
