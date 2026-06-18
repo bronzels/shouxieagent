@@ -42,7 +42,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    default=os.environ.get("OPENROUTER_API_KEY", ""),
                    help="OpenRouter API key（默认读环境变量 OPENROUTER_API_KEY）")
     p.add_argument("--uitars-local-url", default="http://192.168.3.14:8000/v1",
-                   help="本地 UI-TARS server 地址（/v1 前缀）")
+                   help="本地 UI-TARS server 地址（/v1 前缀，仅 --use-local 时生效）")
+    p.add_argument("--use-local", action="store_true",
+                   help="也用本地 UI-TARS（默认关闭，只用 OpenRouter）")
     p.add_argument("--max-ads", type=int, default=100,
                    help="安全上限：最多看多少次广告，默认100")
     p.add_argument("--serial", default=None,
@@ -53,7 +55,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 async def main_async(args) -> int:
-    vision.configure(args.openrouter_key, args.uitars_local_url)
+    # 默认只用 OpenRouter（不连本地 UI-TARS）；--use-local 才本地优先+OpenRouter兜底
+    if args.use_local:
+        vision.configure(args.openrouter_key, args.uitars_local_url, use_local=True)
+    else:
+        vision.configure(args.openrouter_key, use_local=False)
+    print(f"  ▶ 视觉后端: {'本地优先+OpenRouter兜底' if args.use_local else '仅 OpenRouter'}", flush=True)
     dev = ScrcpyDevice(args.scrcpy_dir, args.window_title, args.serial)
     dev.start()
     try:

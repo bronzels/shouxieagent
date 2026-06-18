@@ -167,7 +167,7 @@ class ScrcpyDevice:
             }],
             "max_tokens": 64,
         }
-        result = _vision._post_uitars_local_sync(payload)
+        result = _vision._post_uitars_sync(payload)   # 按 USE_LOCAL 选本地/OpenRouter
         return result["choices"][0]["message"]["content"] or ""
 
     def _locate_sync(self, image_path: str, instruction: str) -> tuple[int, int] | None:
@@ -188,7 +188,7 @@ class ScrcpyDevice:
             }],
             "max_tokens": 512,
         }
-        result = _vision._post_uitars_local_sync(payload)
+        result = _vision._post_uitars_sync(payload)   # 按 USE_LOCAL 选本地/OpenRouter
         resp = result["choices"][0]["message"]["content"] or ""
         w, h = self._img_size or (1080, 1920)
         norm = _vision._parse_point(resp, w, h)

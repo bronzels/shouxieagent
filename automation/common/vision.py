@@ -11,17 +11,20 @@ OPENROUTER_API_KEY = ""
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 UITARS_LOCAL_URL = "http://192.168.3.14:8000/v1"
 UITARS_MODEL = "bytedance/ui-tars-1.5-7b"
+USE_LOCAL = True   # True=本地优先+OpenRouter兜底；False=只用OpenRouter(跳过本地UI-TARS)
 
 # 本任务只用 UI-TARS 这一类 GUI grounding 模型，不引入独立文字/多模态模型链。
-# OpenRouter 仅作本地 UI-TARS 不可达时的同款模型 fallback（models=[UITARS_MODEL]）。
+# 本地优先、OpenRouter 同款兜底；也可只用 OpenRouter（use_local=False，跳过本地）。
 
 
-def configure(openrouter_key: str, uitars_local_url: str) -> None:
-    global OPENROUTER_API_KEY, UITARS_LOCAL_URL
+def configure(openrouter_key: str, uitars_local_url: str = None, use_local: bool = True) -> None:
+    global OPENROUTER_API_KEY, UITARS_LOCAL_URL, USE_LOCAL
     if openrouter_key:
         OPENROUTER_API_KEY = openrouter_key
     if uitars_local_url:
         UITARS_LOCAL_URL = uitars_local_url
+    # 未给本地地址、或显式 use_local=False → 只用 OpenRouter
+    USE_LOCAL = bool(use_local and uitars_local_url) if uitars_local_url is not None else use_local
 
 
 def image_to_base64(image_path: str) -> str:
@@ -71,6 +74,36 @@ def _post_uitars_local_sync(payload: dict) -> dict:
     return {"choices": [{"message": {"content": resp.choices[0].message.content}}]}
 
 
+def _post_openrouter_sync(payload: dict, models: list = None) -> dict:
+    """同步调用 OpenRouter（httpx 同步），逐个 model 试。供需要同步推理的调用方使用。"""
+    model_list = models or [payload.get("model")]
+    last_err = "unknown"
+    with httpx.Client(timeout=120.0) as client:
+        for model in model_list:
+            body = dict(payload)
+            body["model"] = model
+            try:
+                r = client.post(
+                    f"{OPENROUTER_BASE_URL}/chat/completions",
+                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+                    json=body,
+                )
+                if r.status_code == 200:
+                    return r.json()
+                last_err = f"{model} HTTP {r.status_code}"
+            except Exception as e:  # noqa: BLE001
+                last_err = f"{model} {str(e)[:60]}"
+    raise RuntimeError(f"OpenRouter(sync) 失败: {last_err}")
+
+
+def _post_uitars_sync(payload: dict) -> dict:
+    """统一的同步 UI-TARS 调用：USE_LOCAL=True 走本地，否则走 OpenRouter 同款。
+    供需要同步推理的调用方使用（如桌面 ScrcpyDevice 的 current_package/activate_app）。"""
+    if USE_LOCAL:
+        return _post_uitars_local_sync(payload)
+    return _post_openrouter_sync(payload, models=[UITARS_MODEL])
+
+
 async def call_uitars(image_path: str, task_prompt: str) -> str:
     """UI-TARS grounding：本地优先，连续失败 fallback 到 OpenRouter 同款 ui-tars。返回含 Action 的文本。"""
     from ui_tars.prompt import COMPUTER_USE_DOUBAO
@@ -87,18 +120,19 @@ async def call_uitars(image_path: str, task_prompt: str) -> str:
         }],
         "max_tokens": 512,
     }
-    # 本地优先，3 次重试
-    for attempt in range(3):
-        try:
-            result = await asyncio.to_thread(_post_uitars_local_sync, payload)
-            content = result["choices"][0]["message"]["content"]
-            if content and content.strip():
-                return content
-        except Exception as e:  # noqa: BLE001
-            if attempt == 2:
-                print(f"  ⚠️ 本地 UI-TARS 连续失败({str(e)[:60]})，fallback OpenRouter", flush=True)
-            await asyncio.sleep(2.0 * (attempt + 1))
-    # fallback：OpenRouter 同款 ui-tars
+    # 本地优先，3 次重试（USE_LOCAL=False 时跳过，直接走 OpenRouter）
+    if USE_LOCAL:
+        for attempt in range(3):
+            try:
+                result = await asyncio.to_thread(_post_uitars_local_sync, payload)
+                content = result["choices"][0]["message"]["content"]
+                if content and content.strip():
+                    return content
+            except Exception as e:  # noqa: BLE001
+                if attempt == 2:
+                    print(f"  ⚠️ 本地 UI-TARS 连续失败({str(e)[:60]})，fallback OpenRouter", flush=True)
+                await asyncio.sleep(2.0 * (attempt + 1))
+    # OpenRouter 同款 ui-tars（本地兜底 或 仅用 OpenRouter）
     result = await _post_openrouter(payload, models=[UITARS_MODEL])
     return result["choices"][0]["message"]["content"]
 
@@ -151,12 +185,13 @@ async def read_text(image_path: str, question: str) -> str:
         }],
         "max_tokens": 256,
     }
-    try:
-        result = await asyncio.to_thread(_post_uitars_local_sync, payload)
-        content = result["choices"][0]["message"]["content"]
-        if content and content.strip():
-            return content
-    except Exception:  # noqa: BLE001
-        pass
+    if USE_LOCAL:
+        try:
+            result = await asyncio.to_thread(_post_uitars_local_sync, payload)
+            content = result["choices"][0]["message"]["content"]
+            if content and content.strip():
+                return content
+        except Exception:  # noqa: BLE001
+            pass
     result = await _post_openrouter(payload, models=[UITARS_MODEL])
     return result["choices"][0]["message"]["content"] or ""

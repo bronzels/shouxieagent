@@ -67,6 +67,7 @@ def _build_args(**kwargs):
         window_title="scrcpy-kugou",
         openrouter_key="",
         uitars_local_url="http://127.0.0.1:8000/v1",
+        use_local=False,
         max_ads=100,
         serial=None,
         dry_run=False,
