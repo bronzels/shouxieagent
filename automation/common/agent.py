@@ -140,14 +140,9 @@ class KugouAdsAgent:
         await self.sleep(2.0)
         if await self._on_ads_center():
             return True
-        # 兜底：所有关闭X都没回到中心 → 直接按返回键逃出避免卡死(本次可能未领到奖励)
-        # (落地页是酷狗内webview, current_package仍是酷狗, 不能靠_in_kugou判断, 直接back)
-        for _ in range(2):
-            self.dev.back()
-            await self.sleep(1.2)
-            if await self._on_ads_center():
-                return True
-        return False
+        # 兜底：所有关闭X都没回到中心 → 交给通用恢复(会区分:跳出酷狗到真第三方App就重开酷狗、
+        # 还在酷狗内子页就反复『<』返回)，避免卡死
+        return await self._recover_to_center()
 
     async def _handle_giveup_popup(self, browse_secs: int) -> bool:
         """检测『要放弃免费听歌吗/放弃奖励』挽留弹窗：有就点『继续浏览』保住奖励、再浏览够时间，
@@ -202,13 +197,24 @@ class KugouAdsAgent:
         return self._in_kugou()
 
     async def _recover_to_center(self, max_steps: int = 6) -> bool:
-        """卡在非奖励中心页(会员权益/分享/详情等)时的通用恢复：
-        反复点左上角『<』返回(系统back)逐层退出，检测到回到『免费听歌中心』就停；
-        若退到了酷狗主页则重新点『免』图标进中心。返回是否成功回到中心。"""
+        """卡在非奖励中心页时的通用恢复，分两种情况：
+        1) 跳进了【真正的第三方App】(如淘宝App，没有左上角『<』也没有右上角『X』)：
+           无法靠返回键退出 → 重开酷狗(self.dev.activate_app，等价于上滑回桌面/最近任务再打开酷狗)。
+        2) 还在酷狗内的子页(会员权益/分享/详情/webview)：反复点左上角『<』返回(系统back)逐层退出，
+           退到主页则重新点『免』进中心。
+        检测到回到『免费听歌中心』即停。返回是否成功回到中心。"""
         for _ in range(max_steps):
             if await self._on_ads_center():
                 return True
-            if await self._on_kugou_home():       # 退到主页了 → 重新进中心
+            if not self._in_kugou():
+                # 已跳出酷狗到真第三方App → 重开酷狗(上滑/最近任务再打开酷狗的程序等价)
+                self.dev.activate_app()
+                await self.sleep(2.5)
+                await self.reset_to_kugou_home()
+                if await self.navigate_to_ads_page():
+                    return True
+                continue
+            if await self._on_kugou_home():        # 退到主页了 → 重新点『免』进中心
                 if await self.navigate_to_ads_page():
                     return True
             self.dev.back()                        # = 点左上角『<』返回上一页

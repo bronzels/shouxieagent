@@ -1,0 +1,12 @@
+  ▶ 初始剩余时长: 847 分钟
+  · step1: watch (label=点击浏览5秒) | 
+ACTION=WATCH; LABEL=点击浏览5秒; SECONDS=5
+  ▶ 已看 1 次广告，当前剩余: 847 分钟 (目标 1200)
+    (检测到不在中心页，尝试返回回到免费听歌中心)
+  · step2: back (label=) | 
+HOME; LABEL=无; SECONDS=0
+    (忽略疑似误读 3 分钟，保持 847)
+  ▶ 已看 1 次广告，当前剩余: 847 分钟 (目标 1200)
+    (检测到不在中心页，尝试返回回到免费听歌中心)
+  · step3: watch (label=免费听歌时长) | 
+ACTION=WATCH; LABEL=免费听歌时长; SECONDS=0

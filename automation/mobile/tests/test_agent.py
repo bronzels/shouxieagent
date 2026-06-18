@@ -235,6 +235,38 @@ async def test_recover_to_center_backs_until_center():
 
 
 @pytest.mark.asyncio
+async def test_recover_relaunches_kugou_when_in_third_party_app():
+    """跳进真正的第三方App(如淘宝App,无『<』和『X』)时，重开酷狗(activate_app)
+    而不是只按返回键——对应『上滑回桌面/最近任务再打开酷狗』。"""
+    class ThirdPartyThenKugouDevice(FakeDevice):
+        def __init__(self):
+            super().__init__()
+            self.activated = 0
+            self._launched = False
+        def current_package(self):
+            return "com.kugou.android" if self._launched else "com.taobao.taobao"
+        def activate_app(self):
+            self.activated += 1
+            self._launched = True
+
+    class CenterAfterRelaunchVision:
+        def __init__(self): self.center_checks = 0
+        async def locate(self, image_path, instruction, w, h): return (50, 50)
+        async def read_text(self, image_path, question):
+            if "任务中心" in question:
+                self.center_checks += 1
+                return "是" if self.center_checks >= 2 else "否"
+            if "主页" in question: return "是"
+            return "无"
+
+    dev = ThirdPartyThenKugouDevice()
+    agent = KugouAdsAgent(device=dev, vision=CenterAfterRelaunchVision(), sleep=_no_sleep)
+    ok = await agent._recover_to_center()
+    assert ok is True
+    assert dev.activated >= 1        # 重开了酷狗(没只靠返回键)
+
+
+@pytest.mark.asyncio
 async def test_navigate_retries_when_not_on_center():
     """鲁棒性：进错页面(中心校验为否)时 back 退回重试，最终进入中心，而非卡死。"""
     dev = FakeDevice()
