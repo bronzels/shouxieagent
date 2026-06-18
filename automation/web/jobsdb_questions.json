@@ -1,0 +1,635 @@
+{
+  "questionnaire.HK_Q_238BBA7D8742773C0B81C44A2D4753F4_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 2,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_3217_V_3": {
+    "kind": "radio",
+    "question": "Which of the following statements best describes your right to work in Hong Kong?",
+    "options": [
+      "I am a Hong Kong SAR citizen",
+      "I am a Hong Kong SAR permanent resident",
+      "I have a temporary visa (eg. QMAS, TTPS, IANG)",
+      "I have a temporary visa with restrictions on industry (eg. TechTAS)",
+      "I require sponsorship to work for a new employer (e.g. GEP - Professionals or Employment as Imported Workers visa)"
+    ],
+    "seen_count": 33,
+    "last_answered": true,
+    "last_chosen": "I have a temporary visa (eg. QMAS, TTPS, IANG)"
+  },
+  "questionnaire.HK_Q_2648_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 9,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_3292_V_1": {
+    "kind": "select",
+    "options": [
+      "$100K",
+      "$10K",
+      "$11K",
+      "$120K or more",
+      "$12K",
+      "$13K",
+      "$14K",
+      "$15K",
+      "$16K",
+      "$17K",
+      "$18K",
+      "$19K",
+      "$20K",
+      "$25K",
+      "$30K",
+      "$35K",
+      "$40K",
+      "$50K",
+      "$5K",
+      "$60K",
+      "$6K",
+      "$7K",
+      "$80K",
+      "$8K",
+      "$9K"
+    ],
+    "seen_count": 30,
+    "last_answered": true,
+    "last_chosen": "$40K"
+  },
+  "questionnaire.HK_Q_2C5D4832186B8B9CBBF377131AEB5840_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 9,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_3034_V_1": {
+    "kind": "checkbox",
+    "options": [
+      ".NET",
+      "C",
+      "C#",
+      "C++",
+      "CSS",
+      "HTML",
+      "Java",
+      "JavaScript",
+      "None of these",
+      "Objective-C",
+      "PHP",
+      "Python",
+      "Ruby",
+      "Scala",
+      "Swift",
+      "Visual Basic"
+    ],
+    "seen_count": 12,
+    "last_answered": true,
+    "last_chosen": "JavaScript, Java, C, C#, Python, C++"
+  },
+  "questionnaire.HK_Q_3131_V_1": {
+    "kind": "radio",
+    "question": "Have you worked in a role which requires experience with machine learning techniques?",
+    "options": [
+      "No",
+      "Yes"
+    ],
+    "seen_count": 4,
+    "last_answered": true,
+    "last_chosen": "Yes"
+  },
+  "questionnaire.HK_Q_3222_V_1": {
+    "kind": "checkbox",
+    "options": [
+      "Limited proficiency",
+      "Speaks proficiently in a professional setting",
+      "Writes proficiently in a professional setting"
+    ],
+    "seen_count": 3,
+    "last_answered": true,
+    "last_chosen": "Writes proficiently in a professional setting, Speaks proficiently in a professional setting"
+  },
+  "questionnaire.HK_Q_3238_V_1": {
+    "kind": "checkbox",
+    "options": [
+      "Cantonese",
+      "English",
+      "French",
+      "German",
+      "Japanese",
+      "Korean",
+      "Mandarin",
+      "Other (language not listed)"
+    ],
+    "seen_count": 7,
+    "last_answered": false,
+    "last_chosen": "Other (language not listed)",
+    "needs_rule": true
+  },
+  "questionnaire.HK_Q_226_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_FDEABB6BF1F511189DDE04B79FC28B07_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_3134_V_1": {
+    "kind": "radio",
+    "question": "Do you have experience using Model-View-Controller (MVC) architecture patterns?",
+    "options": [
+      "No",
+      "Yes"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "Yes"
+  },
+  "questionnaire.HK_Q_3122_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_3025_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 2,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_F1D0E2C30F927F75C4E7B717F041105D_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_2856_V_1": {
+    "kind": "checkbox",
+    "options": [
+      "Excel",
+      "Hadoop",
+      "KNIME",
+      "Mathematica",
+      "Matlab",
+      "None of these",
+      "R",
+      "RapidMiner",
+      "SAS",
+      "SPSS",
+      "SPSS Modeller (Clementine)",
+      "SQL",
+      "SciPy",
+      "Statistica",
+      "Tableau"
+    ],
+    "seen_count": 2,
+    "last_answered": false,
+    "last_chosen": "R",
+    "needs_rule": true
+  },
+  "questionnaire.HK_Q_2321_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_89C4A5A5328ED9E03F6A6FE34C418538_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_2140_V_1": {
+    "kind": "select",
+    "options": [
+      "1 week",
+      "2 weeks",
+      "3 weeks",
+      "4 weeks",
+      "5 weeks",
+      "6 or more weeks",
+      "None, I'm ready to go now"
+    ],
+    "seen_count": 3,
+    "last_answered": true,
+    "last_chosen": "6 or more weeks"
+  },
+  "questionnaire.HK_Q_623038D7EC1E47DD9FB18009533580CC_V_2": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_2339_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_2417_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 3,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_412E7099CAD709AE610E6494808649AD_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_80DA2AF15B7D1015D9338E5C4A7DA817_V_2": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_90F149474B436BCBC1AC941B4CE9D3EC_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_2348_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_6878340B4F0D3A9EFE8201A2C8E2EDAC_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_C9099C2F0D49ECE5B9EFB0C1B82EF3F4_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_6AF82D0B9B59CBB122D06954C07DCA23_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_3179_V_1": {
+    "kind": "radio",
+    "question": "Do you have experience working in a business banking environment?",
+    "options": [
+      "No",
+      "Yes"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "Yes"
+  },
+  "questionnaire.HK_Q_B7E78667D0812E5ABABAF51D7F833E5E_V_2": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_2174_V_1": {
+    "kind": "checkbox",
+    "options": [
+      "Cisco Certified Network Associate (CCNA) Security",
+      "CompTIA Security+",
+      "EC-Council Certified Ethical Hacker (CEH)",
+      "EC-Council Computer Hacking Forensic Investigator (CHFI)",
+      "ISACA Certified Information Security Manager (CISM)",
+      "ISACA Certified Information Systems Auditor (CISA)",
+      "ISACA Certified in Risk and Information Systems Control (CRISC)",
+      "ISC2 Certified Cloud Security Professional (CCSP)",
+      "ISC2 Certified Information System Security Professional (CISSP)",
+      "NIST Cybersecurity Professional (NCSP)",
+      "None of these",
+      "Palo Alto Networks Certified Cybersecurity Associate (PCCSA)",
+      "Palo Alto Networks Certified Network Security Administrator (PCNSA)",
+      "Palo Alto Networks Certified Network Security Engineer (PCNSE)"
+    ],
+    "seen_count": 1,
+    "last_answered": false,
+    "last_chosen": "Cisco Certified Network Associate (CCNA) Security",
+    "needs_rule": true
+  },
+  "questionnaire.HK_Q_4239D0BEA33EF688A8B7D6867186400B_V_2": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_550_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_1054_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  },
+  "questionnaire.HK_Q_2969_V_1": {
+    "kind": "checkbox",
+    "options": [
+      "CentOS",
+      "Chromium",
+      "CoreOS",
+      "Debian",
+      "Fedora",
+      "None of these",
+      "OpenWRT",
+      "Pentoo",
+      "Red Hat (RHEL)",
+      "SME Server",
+      "SUSE",
+      "Scientific Linux",
+      "Ubuntu",
+      "Vyatta"
+    ],
+    "seen_count": 1,
+    "last_answered": false,
+    "last_chosen": "Red Hat (RHEL)",
+    "needs_rule": true
+  },
+  "questionnaire.HK_Q_3014_V_1": {
+    "kind": "checkbox",
+    "options": [
+      "Ansible",
+      "CFEngine",
+      "Chef",
+      "None of these",
+      "Octopus",
+      "Puppet",
+      "Vagrant"
+    ],
+    "seen_count": 1,
+    "last_answered": false,
+    "last_chosen": "Puppet",
+    "needs_rule": true
+  },
+  "questionnaire.HK_Q_172_V_1": {
+    "kind": "select",
+    "options": [
+      "1 year",
+      "2 years",
+      "3 years",
+      "4 years",
+      "5 years",
+      "Less than 1 year",
+      "More than 5 years",
+      "No experience"
+    ],
+    "seen_count": 1,
+    "last_answered": true,
+    "last_chosen": "More than 5 years"
+  }
+}

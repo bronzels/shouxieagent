@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # 监听本地 ui-tars-server 目录变更，自动 rsync 到 192.168.3.14
-# 在 WSL 中运行：bash automation/ui-tars-server/sync_watch.sh
+# 在 WSL 中运行：bash automation/web/ui-tars-server/sync_watch.sh
+# 注：本脚本自定位（LOCAL_DIR=脚本所在目录），目录整体移动后无需改路径；
+#     远程目标 /mnt/ext4disk/ui-tars 不变。
 
 set -euo pipefail
 
