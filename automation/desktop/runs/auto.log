@@ -1,0 +1,8 @@
+  ▶ 初始剩余时长: 715 分钟
+  · step1: wait (label=) | 
+ACTION=WAIT; LABEL=无; SECONDS=0
+  ▶ 已看 0 次广告，当前剩余: 715 分钟 (目标 780)
+  · step2: watch (label=点击浏览5秒) | 
+ACTION=WATCH; LABEL=点击浏览5秒; SECONDS=0
+  ▶ 已看 1 次广告，当前剩余: 834 分钟 (目标 780)
+  ✅ 已达目标，最终剩余 834 分钟 (≥780)
