@@ -238,8 +238,12 @@ class KugouAdsAgent:
                     await self.navigate_to_ads_page()
                     stale_home = 0
             new_remaining = await self.read_remaining_minutes()
-            if new_remaining is not None:
+            # 单调性护栏：免费时长不可能一步骤降(看完广告常落在非中心页、读到乱数)。
+            # 只接受小幅下降(自然消耗)或上涨(领到奖励)；骤降视为误读丢弃。
+            if new_remaining is not None and new_remaining >= remaining - 30:
                 remaining = new_remaining
+            elif new_remaining is not None:
+                print(f"    (忽略疑似误读 {new_remaining} 分钟，保持 {remaining})", flush=True)
             print(f"  ▶ 已看 {ads} 次广告，当前剩余: {remaining} 分钟 (目标 {target_minutes})",
                   flush=True)
         if remaining >= target_minutes:

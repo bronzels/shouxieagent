@@ -1,31 +1,10 @@
-  ▶ 初始剩余时长: 529 分钟
+  ▶ 初始剩余时长: 519 分钟
   · step1: watch (label=点击浏览5秒) | 
-ACTION=WATCH; LABEL=点击浏览5秒; SECONDS=5
-  ▶ 已看 1 次广告，当前剩余: 528 分钟 (目标 720)
-  · step2: watch (label=点击浏览5秒,去浏览,去观看,去浏览) | 
-ACTION=WATCH; LABEL=点击浏览5秒,去浏览,去观看,去浏览; SECONDS=5
-  ▶ 已看 2 次广告，当前剩余: 528 分钟 (目标 720)
-  · step3: watch (label=看一段视频) | 
-ACTION=WATCH; LABEL=看一段视频; SECONDS=0
-  ▶ 已看 3 次广告，当前剩余: 528 分钟 (目标 720)
-  · step4: watch (label=点击跳转后浏览10秒，免费听歌0) | 
-ACTION=WATCH; LABEL=点击跳转后浏览10秒，免费听歌0； SECONDS=10
-  ▶ 已看 4 次广告，当前剩余: 528 分钟 (目标 720)
-  · step5: wait (label=) | 
-ACTION=WAIT; LABEL=无; SECONDS=0
-  ▶ 已看 4 次广告，当前剩余: 528 分钟 (目标 720)
-  · step6: close (label=坚持退出) | 
-ACTION=CLOSE; LABEL=坚持退出； SECONDS=0
-  ▶ 已看 4 次广告，当前剩余: 528 分钟 (目标 720)
-  · step7: watch (label=点击继续浏览) | 
-ACTION=WATCH; LABEL=点击继续浏览; SECONDS=10
-  ▶ 已看 5 次广告，当前剩余: 528 分钟 (目标 720)
-  · step8: watch (label=点击卡片) | 
-ACTION=WATCH; LABEL=点击卡片; SECONDS=0
-  ▶ 已看 6 次广告，当前剩余: 528 分钟 (目标 720)
-  · step9: close (label=关闭弹窗) | 
-ACTION=CLOSE; LABEL=关闭弹窗; SECONDS=0
-  ▶ 已看 6 次广告，当前剩余: 528 分钟 (目标 720)
-  · step10: watch (label=点击浏览5秒，LABEL2=看一段视频) | 
-ACTION=WATCH; LABEL=点击浏览5秒，LABEL2=看一段视频; SECONDS=0
-  ▶ 已看 7 次广告，当前剩余: 522 分钟 (目标 720)
+ACTION=WATCH; LABEL=点击浏览5秒; SECONDS=0
+  ▶ 已看 1 次广告，当前剩余: 15 分钟 (目标 720)
+  · step2: watch (label=点击商品打开App可再获得免费听歌15分钟) | 
+ACTION=WATCH; LABEL=点击商品打开App可再获得免费听歌15分钟; SECONDS=15
+  ▶ 已看 2 次广告，当前剩余: 547 分钟 (目标 720)
+  · step3: wait (label=) | 
+ACTION=WAIT; SECONDS=0
+  ▶ 已看 2 次广告，当前剩余: 546 分钟 (目标 720)
