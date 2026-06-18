@@ -91,10 +91,15 @@ def is_blocked(data: dict, company: str, position: str) -> bool:
 
 
 def upsert_status(data: dict, company: str, position: str, status: str,
-                  task_source: str = "", note: str = ""):
+                  task_source: str = "", note: str = "",
+                  reply_text: str = "", intent: str = ""):
     """
     新增或更新某职位的对方回应状态（消息扫描任务调用）。
     status 必须是 ALL_STATUSES 之一。
+
+    新增固化字段（便于后续人工跟进/导出，尤其 other 留待人工的会话）：
+      - reply_text：对方最后一条消息【完整原话】（不截断）
+      - intent    ：LLM 分类意图（rejected/asked_resume/other 等）
     """
     if status not in ALL_STATUSES:
         raise ValueError(f"非法状态: {status}，应为 {ALL_STATUSES} 之一")
@@ -108,6 +113,10 @@ def upsert_status(data: dict, company: str, position: str, status: str,
                 r["task_source"] = task_source
             if note:
                 r["note"] = note
+            if reply_text:
+                r["reply_text"] = reply_text
+            if intent:
+                r["intent"] = intent
             save_status(data)
             return
     rec = {"company": company, "position": position, "status": status,
@@ -116,5 +125,9 @@ def upsert_status(data: dict, company: str, position: str, status: str,
         rec["task_source"] = task_source
     if note:
         rec["note"] = note
+    if reply_text:
+        rec["reply_text"] = reply_text
+    if intent:
+        rec["intent"] = intent
     data["records"].append(rec)
     save_status(data)

@@ -836,16 +836,19 @@ class ZhipinMessageScanner:
             zhipin_status.upsert_status(
                 self.status_data, company, position, "rejected",
                 task_source=TASK_SOURCE, note=f"对方拒绝: {other_text[:60]}",
+                reply_text=other_text, intent=intent,
             )
             print("  → 状态: rejected (对方拒绝)", flush=True)
             return {"company": company, "position": position,
-                    "status": "rejected", "note": other_text[:60]}
+                    "status": "rejected", "intent": intent,
+                    "reply_text": other_text, "note": other_text[:60]}
 
         # 情况4：索要简历 → 先标 asked_resume，再发简历，发后改 resume_sent
         if intent == "asked_resume":
             zhipin_status.upsert_status(
                 self.status_data, company, position, "asked_resume",
                 task_source=TASK_SOURCE, note=f"对方索要简历: {other_text[:60]}",
+                reply_text=other_text, intent=intent,
             )
             print("  → 状态: asked_resume (对方索要简历)", flush=True)
 
@@ -879,11 +882,13 @@ class ZhipinMessageScanner:
         # 记为 unread（不进入拦截集合，留待人工处理或后续重投），并在 note 说明。
         zhipin_status.upsert_status(
             self.status_data, company, position, "unread",
-            task_source=TASK_SOURCE, note=f"对方有回复但非拒绝/索简历(other): {other_text[:60]}",
+            task_source=TASK_SOURCE, note=f"对方有回复但非拒绝/索简历(other)，留待人工: {other_text[:60]}",
+            reply_text=other_text, intent="other",
         )
-        print("  → 状态: unread (对方回复=other，留待人工)", flush=True)
+        print(f"  → 状态: unread (对方回复=other，留待人工) 原话='{other_text[:50]}'", flush=True)
         return {"company": company, "position": position,
-                "status": "unread", "note": f"other: {other_text[:60]}"}
+                "status": "unread", "intent": "other",
+                "reply_text": other_text, "note": f"other(留待人工): {other_text[:60]}"}
 
     # ── CSV 导出（可选）─────────────────────────────────────────────────────────
     def export_scan_csv(self) -> str:
@@ -900,10 +905,11 @@ class ZhipinMessageScanner:
             w = csv.writer(f)
             w.writerow([f"扫描时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                         f"会话数：{len(self.scan_rows)}"])
-            w.writerow(["序号", "公司", "职位", "状态", "备注"])
+            w.writerow(["序号", "公司", "职位", "状态", "意图", "对方原话", "备注"])
             for i, r in enumerate(self.scan_rows, 1):
                 w.writerow([i, r.get("company", ""), r.get("position", ""),
-                            r.get("status", ""), r.get("note", "")])
+                            r.get("status", ""), r.get("intent", ""),
+                            r.get("reply_text", ""), r.get("note", "")])
         return str(path)
 
     # ── 主流程 ──────────────────────────────────────────────────────────────────
