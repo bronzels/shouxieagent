@@ -13,19 +13,19 @@ INSTRUCTIONS = {
         "如果广告正在播放就等待；广告播完后点击右上角『关闭/×/跳过』和『领取奖励』。"
     ),
     "CHECK_PROGRESS": (
-        "查看当前VIP累计时长是否已达到或超过目标；"
-        "如果页面提示『今日已领完』『暂无机会』就结束；否则返回继续看广告。"
+        "查看已新增的VIP累计时长是否已达到目标新增量；"
+        "如果已达到就结束；否则返回继续看广告。"
     ),
 }
 
 
 class KugouTask:
-    def __init__(self, window, agent, inp, target_hours=14, max_rounds=200,
+    def __init__(self, window, agent, inp, add_hours=14, max_rounds=200,
                  stale_limit=4, max_grounding_retries=3):
         self.window = window
         self.agent = agent
         self.inp = inp
-        self.target_hours = target_hours
+        self.add_hours = add_hours
         self.max_rounds = max_rounds
         self.stale_limit = stale_limit
         self.max_grounding_retries = max_grounding_retries
@@ -77,8 +77,9 @@ class KugouTask:
     def _compose(self):
         # 单条综合指令，让 UI-TARS 自主决策完整任务路径
         return (
-            f"任务：在酷狗音乐app里通过反复『免费看广告』把VIP听歌时长累计到{self.target_hours}小时。"
+            f"任务：在酷狗音乐app里通过反复点击『免费看广告』新增{self.add_hours}小时的免费VIP听歌时长，"
+            f"达到后输出 finished()。"
             f"{self.INSTRUCTIONS['START']} {self.INSTRUCTIONS['LOCATE_ENTRY']} "
             f"{self.INSTRUCTIONS['WATCH_AD']} {self.INSTRUCTIONS['CHECK_PROGRESS']} "
-            f"全部完成或今日已达上限后输出 finished()。"
+            f"全部完成后输出 finished()。"
         )

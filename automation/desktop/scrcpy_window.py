@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """scrcpy 窗口管理：定位、前置、截图、坐标映射。"""
 
-import io
 import pygetwindow as gw
 from PIL import Image
 import mss

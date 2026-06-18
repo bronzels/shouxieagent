@@ -36,7 +36,6 @@ class UITarsAgent:
 
     def _predict_with_fallback(self, instruction, screenshot):
         try:
-            self._last_client = self._local
             return self._local.predict(
                 instruction, screenshot, history=self.history, platform="mobile"
             )
@@ -44,7 +43,6 @@ class UITarsAgent:
             if self._remote is None:
                 return None
             try:
-                self._last_client = self._remote
                 return self._remote.predict(
                     instruction, screenshot, history=self.history, platform="mobile"
                 )

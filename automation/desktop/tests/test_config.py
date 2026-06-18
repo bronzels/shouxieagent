@@ -2,8 +2,8 @@
 from automation.desktop import config
 
 
-def test_defaults_target_hours():
-    assert config.DEFAULTS["target_hours"] == 14
+def test_defaults_add_hours():
+    assert config.DEFAULTS["add_hours"] == 14
 
 
 def test_gesture_map_back_and_home():
@@ -11,9 +11,9 @@ def test_gesture_map_back_and_home():
     assert config.SCRCPY_GESTURE["press_home"] == "middle"
 
 
-def test_parse_args_overrides_target_hours():
-    ns = config.parse_args(["--target-hours", "8", "--openrouter-key", "sk-or-x"])
-    assert ns.target_hours == 8
+def test_parse_args_overrides_add_hours():
+    ns = config.parse_args(["--add-hours", "8", "--openrouter-key", "sk-or-x"])
+    assert ns.add_hours == 8
     assert ns.openrouter_key == "sk-or-x"
     assert ns.dry_run is False
 

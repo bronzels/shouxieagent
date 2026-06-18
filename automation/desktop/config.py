@@ -3,7 +3,7 @@
 import argparse
 
 DEFAULTS = {
-    "target_hours": 14,
+    "add_hours": 14,
     "max_rounds": 200,
     "scrcpy_title": "scrcpy",
     "local_url": "http://127.0.0.1:8000/v1",
@@ -22,7 +22,8 @@ SCRCPY_GESTURE = {
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="酷狗刷 VIP 桌面自动化")
-    p.add_argument("--target-hours", type=float, default=DEFAULTS["target_hours"])
+    p.add_argument("--add-hours", type=float, default=DEFAULTS["add_hours"],
+                   help="通过看广告要新增的免费VIP时长(小时)，如14=新增14小时")
     p.add_argument("--max-rounds", type=int, default=DEFAULTS["max_rounds"])
     p.add_argument("--scrcpy-title", default=DEFAULTS["scrcpy_title"])
     p.add_argument("--local-url", default=DEFAULTS["local_url"])

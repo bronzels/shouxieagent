@@ -8,7 +8,8 @@
 
 开发一个 Python 命令行程序，运行在 Windows 上，**通过桌面（desktop）自动化**操作经
 scrcpy 投屏到 PC 的安卓手机，打开酷狗音乐 app，反复点击"免费看广告增加 VIP 听歌时长"，
-累计达到 **14 小时** 后停止。要求：**无论手机当前处于任何屏幕或 app 状态**，运行该程序都能完成任务。
+通过看广告新增指定小时数（命令行 `--add-hours` 指定，如14=新增14小时）的免费VIP时长后停止。
+要求：**无论手机当前处于任何屏幕或 app 状态**，运行该程序都能完成任务。
 
 **本项目的核心验证目的：Windows desktop 自动化能力**（不是 ADB 控制）。因此操作与截图都
 走桌面层（鼠标/键盘模拟 + 桌面窗口截图），ADB 仅用于连接手机、启动 scrcpy。
@@ -66,7 +67,7 @@ automation/desktop/
 2. `uitars_agent` 把图 + 当前指令 + 多轮 history 发给 UI-TARS → 返回 `Thought + Action(坐标)`。
 3. `scrcpy_window` 把"图片坐标系"坐标换算成"PC 屏幕绝对坐标"。
 4. `desktop_input` 用 pyautogui 在该屏幕坐标执行（点击/滑动/长按/back/home/输入）。
-5. `task_kugou` 状态机据画面判断进度，更新 history，决定下一步指令；直到累计 14 小时或停止。
+5. `task_kugou` 状态机据画面判断进度，更新 history，决定下一步指令；直到通过看广告新增指定小时数（`--add-hours` 参数）或停止。
 
 ## 6. 桌面自动化核心（验证重点）
 
@@ -114,9 +115,8 @@ WATCH_AD（看广告子循环）
  └─ 处理弹窗（领取成功、继续观看等）
 
 CHECK_PROGRESS
- └─ 读当前累计 VIP 时长（UI-TARS 视觉问答）
- └─ ≥ 14 小时 → DONE
- └─ "今日已领完/暂无机会" → STOP_LIMIT（报告今日上限 + 下次重试时间）
+ └─ 读已新增的 VIP 时长（UI-TARS 视觉问答）
+ └─ ≥ add_hours → DONE
  └─ 否则 → 回 WATCH_AD
 ```
 
@@ -133,11 +133,11 @@ CHECK_PROGRESS
 | 卡同一画面死循环 | 记录画面 hash + 步数；连续 K 步无变化 → `press_back` 跳出或报告 |
 | 误触发付费/订阅页 | 识别"支付/开通确认"页 → `press_back` 退出，不点确认 |
 | 广告需等待 | `wait()` + 轮询截图，检测到"关闭/×"再继续 |
-| 今日达上限 | 识别"已领完"文案 → 正常停止，报告今日上限 + 下次重试时间 |
+| 时长已达目标 | UI-TARS 读取当前新增时长 ≥ add_hours → DONE，正常停止 |
 | 全程留痕 | 每步截图存 `automation/desktop/runs/<时间戳>/` 便于复盘 |
 
 **命令行参数（仿 web 程序风格）：**
-`--target-hours 14`、`--max-rounds`、`--openrouter-key`、`--local-url`、`--scrcpy-title`、
+`--add-hours 14`（通过看广告要新增的免费VIP时长，如14=新增14小时）、`--max-rounds`、`--openrouter-key`、`--local-url`、`--scrcpy-title`、
 `--dry-run`（只看不点，验证 grounding）。
 
 ## 9. 测试计划（TDD，分层；连手机的需用户显式授权后才执行）
@@ -163,3 +163,8 @@ CHECK_PROGRESS
 - `uitars_agent`：输入图 + 指令 + history，输出动作字典；不关心窗口与桌面。
 - `task_kugou`：编排上述三者跑状态机；不直接碰 pyautogui/win32。
 - 每个单元可独立理解与测试。
+
+## 11. 已知待 E2E 校准
+
+- **完成判定**：新增时长是否达标当前依赖 UI-TARS 自行读取界面VIP时长并输出 `finished()`，真机E2E时需校准酷狗实际显示文案/位置，必要时补显式时长读取逻辑（如截取VIP时长区域，用UI-TARS视觉问答解析数字，与 `add_hours` 对比）。
+- **酷狗无"今日已领完"上限**：用户确认酷狗无此限制，已从状态机和退出逻辑中删除 `STOP_LIMIT` 分支，能领多少领多少。

@@ -15,7 +15,7 @@ def build_task(args):
     inp = DesktopInput(dry_run=args.dry_run)
     return KugouTask(
         window, agent, inp,
-        target_hours=args.target_hours,
+        add_hours=args.add_hours,
         max_rounds=args.max_rounds,
         stale_limit=args.stale_limit,
         max_grounding_retries=args.max_grounding_retries,
@@ -28,13 +28,12 @@ def main(argv=None):
     result = task.run()
     status = result["status"]
     msgs = {
-        "done": f"✅ 完成：已累计到 {args.target_hours} 小时（{result['rounds']} 轮）",
-        "limit": f"⏸ 今日已达上限，请明日再运行（{result['rounds']} 轮）",
+        "done": f"✅ 完成：已新增 {args.add_hours} 小时免费VIP时长（{result['rounds']} 轮）",
         "failed": f"❌ 失败：连续 grounding 解析失败（{result['rounds']} 轮）",
         "max_rounds": f"⚠ 达到最大轮数 {args.max_rounds} 仍未完成",
     }
     print(msgs.get(status, f"结束：{result}"))
-    return 0 if status in ("done", "limit") else 1
+    return 0 if status == "done" else 1
 
 
 if __name__ == "__main__":
