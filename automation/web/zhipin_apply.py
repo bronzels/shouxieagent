@@ -1528,68 +1528,61 @@ class BossZhipinAutomator:
                 continue
         return False
 
-    async def _human_read_jd(self):
-        """拟人化：若职位详情(JD)比可视区域高、需下滚才能看全，就像人一样【分段下滚读完再滚回】。
+    # JD 详情可滚动容器查找脚本（实测：真正的滚动容器是 .job-detail-container，
+    # overflowY:auto 且 scrollHeight>clientHeight；.job-detail-box 是其内容、不可滚）。
+    # 健壮做法：扫描【所有】元素，取 overflow auto/scroll 且溢出最多、且属于详情区的那个。
+    _JD_FIND_SCROLLER = r"""() => {
+        // 优先精确命中已知容器
+        let best = document.querySelector('.job-detail-container');
+        if (best && best.scrollHeight > best.clientHeight + 20) return best;
+        // 通用：在所有元素里找溢出最多的可滚动容器（限定在详情/JD 区域附近）
+        best = null; let bestGap = 20;
+        for (const el of document.querySelectorAll('div,section,article')) {
+            const st = getComputedStyle(el);
+            if (!/(auto|scroll)/.test(st.overflowY)) continue;
+            const gap = el.scrollHeight - el.clientHeight;
+            if (gap <= bestGap) continue;
+            const cls = (el.className || '').toString();
+            // 偏好详情/JD 相关容器，避免误选整页/列表
+            if (/detail|job-box|job-detail|content/i.test(cls) || el.querySelector('.job-detail-box, .job-sec, [class*=job-detail]')) {
+                best = el; bestGap = gap;
+            }
+        }
+        return best;
+    }"""
 
-        - 仅当内容确实溢出视口时才滚动（短 JD 不滚，避免无意义动作）。
-        - 用 scrollIntoView/容器 scrollTop 分几步滚动，配人类化停顿（边滚边读）。
-        - 纯展示性拟人行为：不影响 DOM 文本抓取（_extract_job_description 仍读全文）。
+    async def _human_read_jd(self):
+        """拟人化：若职位详情(JD)比可视区高、需下滚才能看全，就像人一样【分段下滚读完再滚回】。
+
+        实测修正：真正可滚动的是 .job-detail-container（不是 .job-detail-box）。改为直接定位
+        该滚动容器（含通用兜底），用 wheel 在容器上滚（更接近真人；纯展示，不影响全文抓取）。
         """
         try:
-            info = await self.page.evaluate(r"""() => {
-                const el = document.querySelector(".job-detail-box, .job-detail, [class*='job-detail']");
-                if (!el) return null;
-                // 找真正可滚动的容器（自身或最近的 overflow auto/scroll 祖先）
-                let sc = el;
-                for (let i=0;i<5 && sc;i++){
-                    const st = getComputedStyle(sc);
-                    if (/(auto|scroll)/.test(st.overflowY) && sc.scrollHeight > sc.clientHeight+20) break;
-                    sc = sc.parentElement;
-                }
-                const target = (sc && sc.scrollHeight > sc.clientHeight+20) ? sc : null;
-                const docOverflow = document.documentElement.scrollHeight >
-                                    window.innerHeight + 40;
-                return {hasContainer: !!target,
-                        ch: target ? target.clientHeight : 0,
-                        sh: target ? target.scrollHeight : 0,
-                        docOverflow};
-            }""")
-            if not info:
-                return
-            # 情况A：详情面板自身是可滚动容器且内容溢出 → 在容器内分段滚动
-            if info.get("hasContainer") and info.get("sh", 0) > info.get("ch", 0) + 20:
-                steps = min(5, max(2, round(info["sh"] / max(info["ch"], 1))))
-                for i in range(steps):
-                    await self.page.evaluate(r"""(frac) => {
-                        const el = document.querySelector(".job-detail-box, .job-detail, [class*='job-detail']");
-                        let sc = el;
-                        for (let i=0;i<5 && sc;i++){
-                            const st = getComputedStyle(sc);
-                            if (/(auto|scroll)/.test(st.overflowY) && sc.scrollHeight > sc.clientHeight+20) break;
-                            sc = sc.parentElement;
-                        }
-                        if (sc) sc.scrollTop = sc.scrollHeight * frac;
-                    }""", (i + 1) / steps)
-                    human_delay(0.6, 1.3)   # 边滚边"读"
-                # 读完滚回顶部（看招呼按钮等）
-                await self.page.evaluate(r"""() => {
-                    const el = document.querySelector(".job-detail-box, .job-detail, [class*='job-detail']");
-                    let sc = el;
-                    for (let i=0;i<5 && sc;i++){
-                        const st = getComputedStyle(sc);
-                        if (/(auto|scroll)/.test(st.overflowY) && sc.scrollHeight > sc.clientHeight+20) break;
-                        sc = sc.parentElement;
-                    }
-                    if (sc) sc.scrollTop = 0;
-                }""")
-                human_delay(0.4, 0.9)
-            # 情况B：详情在整页流里、整页溢出 → 用滚轮分段下滚再回顶
-            elif info.get("docOverflow"):
-                for _ in range(random.randint(2, 4)):
-                    await self.page.mouse.wheel(0, random.randint(350, 600))
-                    human_delay(0.6, 1.2)
-                await self.page.mouse.wheel(0, -100000)
-                human_delay(0.4, 0.9)
+            box = await self.page.query_selector(".job-detail-container")
+            sh = ch = 0
+            if box:
+                dims = await box.evaluate("(e)=>({sh:e.scrollHeight, ch:e.clientHeight})")
+                sh, ch = dims["sh"], dims["ch"]
+            # 容器没溢出 → 用通用脚本再找一次（不同职位结构可能不同）
+            if not box or sh <= ch + 20:
+                handle = await self.page.evaluate_handle(self._JD_FIND_SCROLLER)
+                box = handle.as_element()
+                if box:
+                    dims = await box.evaluate("(e)=>({sh:e.scrollHeight, ch:e.clientHeight})")
+                    sh, ch = dims["sh"], dims["ch"]
+
+            if box and sh > ch + 20:
+                # ⚠️ 不用 mouse.wheel——滚轮滚的是鼠标下方的【左侧职位列表】，不是右侧详情。
+                # 改为直接在【该详情容器】上分段递增 scrollTop（只滚右侧，不动左侧列表），
+                # 小步推进 + 人类化停顿，像人逐段往下读；读完滚回顶部（立即沟通按钮在顶部）。
+                steps = min(8, max(3, round(sh / max(ch, 1) * 2)))
+                for i in range(1, steps + 1):
+                    await box.evaluate("(e,f)=>{e.scrollTop = (e.scrollHeight - e.clientHeight)*f;}",
+                                       i / steps)
+                    human_delay(0.5, 1.1)   # 边滚边"读"
+                human_delay(0.3, 0.7)
+                await box.evaluate("(e)=>{e.scrollTop=0;}")  # 读完滚回顶部
+                human_delay(0.3, 0.7)
         except Exception:
             pass
 
