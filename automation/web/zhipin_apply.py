@@ -1528,6 +1528,71 @@ class BossZhipinAutomator:
                 continue
         return False
 
+    async def _human_read_jd(self):
+        """拟人化：若职位详情(JD)比可视区域高、需下滚才能看全，就像人一样【分段下滚读完再滚回】。
+
+        - 仅当内容确实溢出视口时才滚动（短 JD 不滚，避免无意义动作）。
+        - 用 scrollIntoView/容器 scrollTop 分几步滚动，配人类化停顿（边滚边读）。
+        - 纯展示性拟人行为：不影响 DOM 文本抓取（_extract_job_description 仍读全文）。
+        """
+        try:
+            info = await self.page.evaluate(r"""() => {
+                const el = document.querySelector(".job-detail-box, .job-detail, [class*='job-detail']");
+                if (!el) return null;
+                // 找真正可滚动的容器（自身或最近的 overflow auto/scroll 祖先）
+                let sc = el;
+                for (let i=0;i<5 && sc;i++){
+                    const st = getComputedStyle(sc);
+                    if (/(auto|scroll)/.test(st.overflowY) && sc.scrollHeight > sc.clientHeight+20) break;
+                    sc = sc.parentElement;
+                }
+                const target = (sc && sc.scrollHeight > sc.clientHeight+20) ? sc : null;
+                const docOverflow = document.documentElement.scrollHeight >
+                                    window.innerHeight + 40;
+                return {hasContainer: !!target,
+                        ch: target ? target.clientHeight : 0,
+                        sh: target ? target.scrollHeight : 0,
+                        docOverflow};
+            }""")
+            if not info:
+                return
+            # 情况A：详情面板自身是可滚动容器且内容溢出 → 在容器内分段滚动
+            if info.get("hasContainer") and info.get("sh", 0) > info.get("ch", 0) + 20:
+                steps = min(5, max(2, round(info["sh"] / max(info["ch"], 1))))
+                for i in range(steps):
+                    await self.page.evaluate(r"""(frac) => {
+                        const el = document.querySelector(".job-detail-box, .job-detail, [class*='job-detail']");
+                        let sc = el;
+                        for (let i=0;i<5 && sc;i++){
+                            const st = getComputedStyle(sc);
+                            if (/(auto|scroll)/.test(st.overflowY) && sc.scrollHeight > sc.clientHeight+20) break;
+                            sc = sc.parentElement;
+                        }
+                        if (sc) sc.scrollTop = sc.scrollHeight * frac;
+                    }""", (i + 1) / steps)
+                    human_delay(0.6, 1.3)   # 边滚边"读"
+                # 读完滚回顶部（看招呼按钮等）
+                await self.page.evaluate(r"""() => {
+                    const el = document.querySelector(".job-detail-box, .job-detail, [class*='job-detail']");
+                    let sc = el;
+                    for (let i=0;i<5 && sc;i++){
+                        const st = getComputedStyle(sc);
+                        if (/(auto|scroll)/.test(st.overflowY) && sc.scrollHeight > sc.clientHeight+20) break;
+                        sc = sc.parentElement;
+                    }
+                    if (sc) sc.scrollTop = 0;
+                }""")
+                human_delay(0.4, 0.9)
+            # 情况B：详情在整页流里、整页溢出 → 用滚轮分段下滚再回顶
+            elif info.get("docOverflow"):
+                for _ in range(random.randint(2, 4)):
+                    await self.page.mouse.wheel(0, random.randint(350, 600))
+                    human_delay(0.6, 1.2)
+                await self.page.mouse.wheel(0, -100000)
+                human_delay(0.4, 0.9)
+        except Exception:
+            pass
+
     async def _extract_job_description(self) -> str:
         """
         提取右侧详情面板的职位描述正文，并清洗反爬注入的 CSS 噪音。
@@ -1790,6 +1855,9 @@ class BossZhipinAutomator:
                 print(f"  [WARN] 未能定位/点击职位卡，跳过: {company} | {title}")
                 return "fail"
             human_delay(CARD_DELAY_MIN, CARD_DELAY_MAX)
+
+            # 拟人：JD 比可视区高（需下滚才能看全）→ 像人一样滚动详情面板把它读完再判断
+            await self._human_read_jd()
 
             # 抓取职位描述正文
             desc = await self._extract_job_description()
