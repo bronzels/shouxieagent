@@ -121,3 +121,31 @@ async def test_xml_fallback_when_vision_blank():
     final = await agent.run(target_minutes=840, max_ads=50)
     assert final >= 840          # 经 XML 兜底读到 900 分钟
     assert dev.taps               # 经 page_source 关键字命中点击过
+
+
+class GiveupVision:
+    """模拟出现/未出现『要放弃免费听歌』挽留弹窗。"""
+    def __init__(self, present):
+        self._ans = "有" if present else "无"
+    async def locate(self, image_path, instruction, w, h): return (60, 70)
+    async def read_text(self, image_path, question): return self._ans
+
+
+@pytest.mark.asyncio
+async def test_handle_giveup_popup_clicks_continue():
+    """出现『要放弃免费听歌』挽留弹窗时，点『继续浏览』保住奖励(不放弃)。"""
+    dev = FakeDevice()
+    agent = KugouAdsAgent(device=dev, vision=GiveupVision(present=True), sleep=_no_sleep)
+    handled = await agent._handle_giveup_popup(browse_secs=10)
+    assert handled is True
+    assert dev.taps == [(60, 70)]      # 点了『继续浏览』
+
+
+@pytest.mark.asyncio
+async def test_handle_giveup_popup_absent_no_action():
+    """没有挽留弹窗时不做任何点击。"""
+    dev = FakeDevice()
+    agent = KugouAdsAgent(device=dev, vision=GiveupVision(present=False), sleep=_no_sleep)
+    handled = await agent._handle_giveup_popup(browse_secs=10)
+    assert handled is False
+    assert dev.taps == []

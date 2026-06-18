@@ -9,13 +9,24 @@ import os
 
 import parsers
 
-ENTRY_KEYWORDS = ["看广告", "免费听歌", "免费畅听", "领时长", "去浏览", "看视频", "免费领"]
+ENTRY_KEYWORDS = ["免费听歌模式", "免费听歌", "免费畅听", "看广告", "领时长", "去浏览", "看视频", "免费领", "免"]
+# 酷狗主页进入「免费听歌模式」任务中心的入口：搜索框右边那个蓝色圆角方框里的「免」字图标
+ENTRY_INSTRUCTION = (
+    "点击屏幕顶部搜索框右边那个蓝色圆角方框里的『免』字图标（免费听歌模式入口，"
+    "在扫一扫图标右边）。注意：不要点搜索框本身，要点它右边的蓝色『免』图标。")
 WATCH_KEYWORDS = ["看广告", "看视频", "立即领取", "领取", "观看", "去观看", "去浏览"]
 CLOSE_KEYWORDS = ["关闭", "跳过", "×", "X", "✕", "领取", "完成"]
+# 提前想退出广告时酷狗的挽留弹窗(『要放弃免费听歌吗/确定放弃奖励』)：必须点『继续浏览』保住奖励，
+# 绝不能点『坚持退出/放弃/开通会员』，否则白看广告、时长不增加。
+CONTINUE_KEYWORDS = ["点击继续浏览", "继续浏览", "继续观看", "再看一会", "继续领取", "继续"]
+GIVEUP_QUESTION = (
+    "屏幕上有没有『要放弃免费听歌吗』『确定放弃奖励』『再浏览X秒可获得奖励』『坚持退出』"
+    "这类挽留弹窗(提示再看/再浏览一会就能领到免费听歌时长奖励)？只回答『有』或『无』。")
 REMAIN_QUESTION = (
-    "只看这个页面有没有明确写着『VIP剩余』『免费畅听剩余』『可免费听X分钟/小时』这类"
-    "听歌时长。有就只回答该时长(如『3小时20分』)；没有明确写听歌时长就回答『无』。"
-    "绝对不要把金额(元)、夺宝/宝箱倒计时、歌曲时长、当前时间当作听歌时长。")
+    "这个页面顶部『免费畅听剩余时长』显示的数字是多少？它的格式是 分:秒"
+    "（例如 533:23 表示还剩 533 分钟 23 秒）。请把这个数字原样回答，如『533:23』，"
+    "千万不要把它当成小时:分钟、也不要换算成小时。如果页面没有明确的免费听歌剩余时长，"
+    "就回答『无』。绝对不要把金额(元)、夺宝/宝箱倒计时、歌曲时长、当前时间当作听歌时长。")
 DECIDE_QUESTION = (
     "你在操作酷狗音乐app，目标是反复『看广告领免费听歌时长』把时长攒够。请只看这张截图，"
     "用下面固定格式回答一行，不要解释：\n"
@@ -79,6 +90,19 @@ class KugouAdsAgent:
         return await self._locate_tap("点击右上角关闭广告的×按钮，或『领取奖励/完成』按钮",
                                       CLOSE_KEYWORDS)
 
+    async def _handle_giveup_popup(self, browse_secs: int) -> bool:
+        """检测『要放弃免费听歌吗/放弃奖励』挽留弹窗：有就点『继续浏览』保住奖励、再浏览够时间，
+        绝不点『坚持退出/放弃』。返回 True 表示处理过弹窗(继续浏览了)。
+        这是时长不增加的主因：浏览没够就退出会触发该弹窗、放弃则白看广告。"""
+        ans = await self.vis.read_text(self._shot(), GIVEUP_QUESTION)
+        if "有" in ans and "无" not in ans:
+            await self._locate_tap(
+                "点击『继续浏览/点击继续浏览/继续观看』按钮（绝对不要点坚持退出/放弃/开通会员）",
+                CONTINUE_KEYWORDS)
+            await self.sleep(browse_secs + 4)   # 点继续后把要求的浏览时间看够
+            return True
+        return False
+
     def _in_kugou(self) -> bool:
         return "kugou" in (self.dev.current_package() or "").lower()
 
@@ -117,23 +141,33 @@ class KugouAdsAgent:
             await self.sleep(2.0)
 
     async def navigate_to_ads_page(self) -> bool:
-        """尽量进入看广告入口：视觉优先点入口，未命中回退关键字。"""
+        """进入「免费听歌模式」任务中心：点酷狗主页搜索框右边的蓝色「免」图标。
+        视觉优先(精确指令防误点搜索框)，未命中回退关键字。"""
         for _ in range(3):
-            if await self._locate_tap("点击进入看广告领VIP听歌时长的入口", ENTRY_KEYWORDS):
+            if await self._locate_tap(ENTRY_INSTRUCTION, ENTRY_KEYWORDS):
                 await self.sleep(2.0)
                 return True
             self.dev.back()
             await self.sleep(1.0)
         return False
 
+    # 免费听歌剩余时长的合理上限(分钟)：超过视为误读(如把 533:23 分:秒误当 533小时23分=32003)
+    MAX_PLAUSIBLE_MINUTES = 6000  # 100 小时
+
+    def _sane(self, mins: int | None) -> int | None:
+        """过滤误读：负数或大于合理上限的一律视为无效(None)。"""
+        if mins is None or mins < 0 or mins > self.MAX_PLAUSIBLE_MINUTES:
+            return None
+        return mins
+
     async def read_remaining_minutes(self) -> int | None:
         # 主路径：UI-TARS OCR 读屏（酷狗自绘文字不进无障碍树）
         txt = await self.vis.read_text(self._shot(), REMAIN_QUESTION)
-        mins = parsers.parse_duration_to_minutes(txt)
+        mins = self._sane(parsers.parse_duration_to_minutes(txt))
         if mins is not None:
             return mins
         # 兜底：扫 page_source XML
-        return parsers.extract_duration_from_xml(self.dev.page_source())
+        return self._sane(parsers.extract_duration_from_xml(self.dev.page_source()))
 
     async def watch_one_ad(self) -> bool:
         """点看广告入口 → 按要求秒数定时看够 → 关闭。"""
@@ -173,8 +207,13 @@ class KugouAdsAgent:
                 secs = (decision.get("seconds") or DEFAULT_AD_SECONDS)
                 label = decision.get("label") or "看广告"
                 if await self._locate_tap(f"点击『{label}』按钮看广告领免费听歌时长", WATCH_KEYWORDS):
-                    await self.sleep(secs + 3)   # 定时看够，不死等
-                    await self._close_ad()
+                    await self.sleep(secs + 5)   # 先浏览够要求秒数(+缓冲)，浏览不够会触发放弃挽留弹窗
+                    # 浏览没够想退出会弹『要放弃免费听歌吗』→ 点继续浏览看够再领，最多两轮，绝不放弃奖励
+                    for _ in range(2):
+                        if not await self._handle_giveup_popup(secs):
+                            break
+                    await self._close_ad()       # 浏览够了再关闭/领取
+                    await self._handle_giveup_popup(secs)   # 关闭时若再弹挽留，再继续浏览一次
                     await self._ensure_kugou_foreground()   # 看完回酷狗(批量模式每次+1条)
                     ads += 1
                     # 批量模式：累计够条数后会出现领取按钮 → 领奖（中途时长不涨是正常的）
