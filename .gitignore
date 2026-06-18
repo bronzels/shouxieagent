@@ -22,3 +22,6 @@ automation/web/zhipin_checkpoint.json
 automation/ui-tars-server/.venv/
 automation/ui-tars-server/models/
 automation/ui-tars-server/.ms_cache/
+
+# mobile automation 本地工具（adb/JDK 解压目录，不入库）
+automation/mobile/.tools/
