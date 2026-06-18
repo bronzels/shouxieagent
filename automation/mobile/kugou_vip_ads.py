@@ -9,6 +9,13 @@ import asyncio
 import os
 import sys
 
+# Windows 控制台默认 gbk，打印 ▶/✅ 等字符会崩；统一 UTF-8 输出
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:  # noqa: BLE001
+    pass
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import vision
