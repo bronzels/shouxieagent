@@ -32,6 +32,10 @@ class FakeVision:
         self.read_calls = 0
     async def locate(self, image_path, instruction, w, h): return (50, 50)
     async def read_text(self, image_path, question):
+        if "任务中心" in question:      # _on_ads_center 校验 → 视为已在中心
+            return "是"
+        if "放弃" in question:          # giveup 挽留弹窗检测 → 无弹窗
+            return "无"
         i = min(self.read_calls, len(self.minutes_seq) - 1)
         self.read_calls += 1
         return f"剩余{self.minutes_seq[i]}分钟"
@@ -149,3 +153,28 @@ async def test_handle_giveup_popup_absent_no_action():
     handled = await agent._handle_giveup_popup(browse_secs=10)
     assert handled is False
     assert dev.taps == []
+
+
+class WrongThenCenterVision:
+    """前 wrong_times 次中心校验返回『否』(进错页)，之后返回『是』(进对)。"""
+    def __init__(self, wrong_times):
+        self.wrong_times = wrong_times
+        self.checks = 0
+    async def locate(self, image_path, instruction, w, h): return (50, 50)
+    async def read_text(self, image_path, question):
+        if "任务中心" in question:
+            self.checks += 1
+            return "否" if self.checks <= self.wrong_times else "是"
+        return "无"
+
+
+@pytest.mark.asyncio
+async def test_navigate_retries_when_not_on_center():
+    """鲁棒性：进错页面(中心校验为否)时 back 退回重试，最终进入中心，而非卡死。"""
+    dev = FakeDevice()
+    vis = WrongThenCenterVision(wrong_times=2)   # 前2次进错，第3次进对
+    agent = KugouAdsAgent(device=dev, vision=vis, sleep=_no_sleep)
+    ok = await agent.navigate_to_ads_page()
+    assert ok is True
+    assert vis.checks == 3            # 校验3次(2次失败重试+1次成功)
+    assert len(dev.taps) >= 3         # 至少点了3次入口坐标
