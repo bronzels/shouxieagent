@@ -63,6 +63,44 @@ def parse_required_seconds(text: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def parse_watch_progress(text: str) -> tuple[int, int] | None:
+    """解析批量模式的观看进度。支持『已看2/5』『2/5条』『还需观看3条』『观看5条』等。
+    返回 (已看, 需看)；只给出目标条数(如『观看5条』)时返回 (0, 5)；解析不出返回 None。"""
+    if not text:
+        return None
+    m = re.search(r"(\d+)\s*/\s*(\d+)\s*条?", text)        # 2/5
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    m = re.search(r"已?看\D{0,4}(\d+)\D{0,6}(?:共|/|还需|再看)\D{0,4}(\d+)", text)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    m = re.search(r"(?:观看|看|浏览)\s*(\d+)\s*条", text)    # 观看5条 → 目标5
+    if m:
+        return (0, int(m.group(1)))
+    return None
+
+
+def classify_task_mode(text: str) -> str:
+    """识别看广告领时长页是哪种模式：
+      'scattered'：看一个广告立即奖励一段时长；
+      'batch'    ：要累计观看多条/完成多任务才一次性发奖(有『观看N条』『X/Y』『做任务』等)；
+      'both'     ：两种都有；
+      'unknown'  ：无法判断。"""
+    if not text:
+        return "unknown"
+    batch = bool(re.search(r"观看\s*\d+\s*条|看\s*\d+\s*条|\d+\s*/\s*\d+|"
+                           r"做任务|任务列表|累计|集齐|全部完成|进度|解锁", text))
+    scattered = bool(re.search(r"看(?:一个|1个|完)?广告.{0,6}(?:得|领|获得|\+).{0,4}\d+\s*(?:分钟|小时)|"
+                               r"看视频得\d+|立即领取\d+\s*(?:分钟|小时)|每看", text))
+    if batch and scattered:
+        return "both"
+    if batch:
+        return "batch"
+    if scattered:
+        return "scattered"
+    return "unknown"
+
+
 _VALID_ACTIONS = {"watch", "wait", "close", "back", "home", "done"}
 
 

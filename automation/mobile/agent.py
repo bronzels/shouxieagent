@@ -80,6 +80,19 @@ class KugouAdsAgent:
     def _in_kugou(self) -> bool:
         return "kugou" in (self.dev.current_package() or "").lower()
 
+    async def _try_claim_reward(self) -> bool:
+        """批量模式累计够条数后，页面会出现『领取/领取奖励/领时长』按钮 → 点它领奖。
+        没有可领的就什么都不做（返回 False）。仅当 UI-TARS 明确看到领取按钮才点。"""
+        q = ("这个酷狗页面上有没有【已点亮/可领取】的『领取/领取奖励/领时长/立即领取』按钮"
+             "(不是『去完成/去观看』)？只回答『有:按钮文字』或『无』。")
+        ans = await self.vis.read_text(self._shot(), q)
+        if "无" in ans and "有" not in ans:
+            return False
+        if "领取" in ans or "领时长" in ans or "立即领" in ans:
+            return await self._locate_tap("点击可领取的『领取奖励/领时长』按钮（不是去完成）",
+                                          ["领取", "领时长", "立即领取"])
+        return False
+
     async def _ensure_kugou_foreground(self, max_back: int = 5) -> bool:
         """确保回到酷狗：看完广告常落地在第三方广告 app/夺宝页，单次 back 回不去。
         连退多步(每步检查当前包)，仍不在酷狗则 activate_app 兜底拉回。"""
@@ -160,8 +173,11 @@ class KugouAdsAgent:
                 if await self._locate_tap(f"点击『{label}』按钮看广告领免费听歌时长", WATCH_KEYWORDS):
                     await self.sleep(secs + 3)   # 定时看够，不死等
                     await self._close_ad()
-                    await self._ensure_kugou_foreground()   # 看完回酷狗
+                    await self._ensure_kugou_foreground()   # 看完回酷狗(批量模式每次+1条)
                     ads += 1
+                    # 批量模式：累计够条数后会出现领取按钮 → 领奖（中途时长不涨是正常的）
+                    if await self._try_claim_reward():
+                        print("    🎁 领取了已解锁的奖励", flush=True)
                 stale_home = 0
             elif act == "wait":
                 await self.sleep(5.0)

@@ -87,6 +87,19 @@ def test_parse_decision_invalid_returns_none():
     assert parse_decision("这是一段没有结构化动作的描述") is None
     assert parse_decision("ACTION=FLY") is None
 
+def test_parse_watch_progress():
+    from parsers import parse_watch_progress
+    assert parse_watch_progress("已看2/5条") == (2, 5)
+    assert parse_watch_progress("观看5条得全天听") == (0, 5)
+    assert parse_watch_progress("免费领取") is None
+
+def test_classify_task_mode():
+    from parsers import classify_task_mode
+    assert classify_task_mode("观看5条广告得全天听，进度0/5") == "batch"
+    assert classify_task_mode("看广告立即得30分钟，每看一个加时长") == "scattered"
+    assert classify_task_mode("看一个广告得30分钟；另有观看5条得全天听任务") == "both"
+    assert classify_task_mode("这是设置页") == "unknown"
+
 def test_is_distraction_label():
     from parsers import is_distraction_label
     assert is_distraction_label("点击后，看5秒可得夺宝机会") is True
