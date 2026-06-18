@@ -21,6 +21,11 @@ class Device:
         # vivo/Funtouch 等 ROM 偶发安装辅助 APK 慢，放宽超时
         opts.set_capability("uiautomator2ServerInstallTimeout", 120000)
         opts.set_capability("adbExecTimeout", 120000)
+        # vivo 等无「USB安装」开关的 ROM：辅助 APK 已由 setup.sh 预装(adb install)，
+        # 这里跳过 Appium 的服务安装与设备初始化(否则因缺 aapt2 读不到版本而每次重装、
+        # 反复弹安装授权)。前提:setup.sh 已成功预装 io.appium.settings + uiautomator2 server。
+        opts.set_capability("skipServerInstallation", True)
+        opts.set_capability("skipDeviceInitialization", True)
         self.driver = webdriver.Remote(self.appium_url, options=opts)
         # 关键：酷狗开屏广告等带连续动画+超大视图树的页面，UiAutomator2 默认会
         # 等界面 idle 再全量序列化，导致 getPageSource 卡 45s 并把 instrumentation 拖崩。

@@ -103,14 +103,15 @@ async def call_uitars(image_path: str, task_prompt: str) -> str:
     return result["choices"][0]["message"]["content"]
 
 
-def _parse_point(response: str) -> tuple[float, float] | None:
+def _parse_point(response: str, width: int, height: int) -> tuple[float, float] | None:
     """解析 UI-TARS 响应中的坐标，返回 0-1 归一化 (nx, ny)。
-    优先用 ui_tars 包，失败则正则兜底（坐标系 0-1000）。"""
+    优先用 ui_tars 包（必须传真实图像宽高做 origin 维度，否则非方形屏归一化错、坐标越界），
+    失败则正则兜底（坐标系 0-1000）。"""
     try:
         from ui_tars.action_parser import parse_action_to_structure_output
         parsed = parse_action_to_structure_output(
-            response, factor=1000, origin_resized_height=1000,
-            origin_resized_width=1000, model_type="qwen25vl")
+            response, factor=1000, origin_resized_height=height,
+            origin_resized_width=width, model_type="qwen25vl")
         if parsed:
             box = json.loads(parsed[0]["action_inputs"]["start_box"])
             return (box[0], box[1])
@@ -125,12 +126,14 @@ def _parse_point(response: str) -> tuple[float, float] | None:
 
 
 async def locate(image_path: str, instruction: str, width: int, height: int) -> tuple[int, int] | None:
-    """返回点击像素坐标 (px, py)；定位失败返回 None。"""
+    """返回点击像素坐标 (px, py)；定位失败返回 None。坐标会夹到屏幕范围内。"""
     resp = await call_uitars(image_path, instruction)
-    norm = _parse_point(resp)
+    norm = _parse_point(resp, width, height)
     if norm is None:
         return None
-    return (int(round(norm[0] * width)), int(round(norm[1] * height)))
+    px = min(max(int(round(norm[0] * width)), 0), width - 1)
+    py = min(max(int(round(norm[1] * height)), 0), height - 1)
+    return (px, py)
 
 
 async def read_text(image_path: str, question: str) -> str:

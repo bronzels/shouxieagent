@@ -46,6 +46,26 @@ appium driver list --installed 2>/dev/null | grep -q uiautomator2 \
   || appium driver install uiautomator2 \
   || echo "⚠️ uiautomator2 驱动安装失败，请检查网络后重跑"
 
+echo "==== [3.5/5] 预装 Appium 辅助 APK 到手机 ===="
+# vivo 等 ROM 没有「USB安装」开关，Appium 又因精简版 platform-tools 缺 aapt2 读不到
+# 已装版本，会每次新建会话都重装辅助 APK、反复弹安装授权。这里手工 adb install 预装
+# io.appium.settings + uiautomator2 server，配合 device.py 的 skipServerInstallation/
+# skipDeviceInitialization=true，之后不再弹框。
+ADB_BIN="$(command -v adb || echo "$TOOLS_DIR/platform-tools/adb.exe")"
+U2_BASE="$HOME/.appium/node_modules/appium-uiautomator2-driver/node_modules"
+SETTINGS_APK="$(ls "$U2_BASE"/io.appium.settings/apks/settings_apk-debug.apk 2>/dev/null | head -1)"
+U2_SERVER_APK="$(ls "$U2_BASE"/appium-uiautomator2-server/apks/appium-uiautomator2-server-v*.apk 2>/dev/null | grep -v androidTest | head -1)"
+U2_TEST_APK="$(ls "$U2_BASE"/appium-uiautomator2-server/apks/appium-uiautomator2-server-*androidTest.apk 2>/dev/null | head -1)"
+if [ -n "$SETTINGS_APK" ] && [ -n "$U2_SERVER_APK" ] && [ -n "$U2_TEST_APK" ]; then
+  echo "⚠️ 手机可能弹出安装确认，请在手机上点『安装/允许』（最多 3 次）"
+  "$ADB_BIN" install -r -g "$SETTINGS_APK"  2>&1 | tail -1
+  "$ADB_BIN" install -r -g "$U2_SERVER_APK" 2>&1 | tail -1
+  "$ADB_BIN" install -r -g "$U2_TEST_APK"   2>&1 | tail -1
+  echo "已装辅助 APK：$("$ADB_BIN" shell pm list packages | grep -c io.appium) 个 io.appium.* 包"
+else
+  echo "⚠️ 未找到辅助 APK（路径 $U2_BASE），请确认 appium driver install uiautomator2 已成功后重跑"
+fi
+
 echo "==== [4/5] Python 客户端到 .venv ===="
 [ -f "$VENV_PY" ] || { echo "❌ 未找到 .venv，请先在仓库根目录 python -m venv .venv"; exit 1; }
 "$VENV_PY" -m pip install -U "Appium-Python-Client" "ui_tars" "openai" "httpx" "pytest" "pytest-asyncio"
