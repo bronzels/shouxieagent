@@ -23,18 +23,18 @@ class KugouAdsAgent:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         return self.dev.screenshot(path)
 
-    async def _tap_keyword_or_vision(self, keywords, instruction) -> bool:
-        """选择器优先：page_source 命中关键字直接点；否则视觉兜底定位。"""
-        xml = self.dev.page_source()
-        hit = parsers.find_keyword_bounds(xml, keywords)
-        if hit:
-            self.dev.tap(*hit)
-            return True
+    async def _tap_vision_or_keyword(self, instruction, keywords) -> bool:
+        """视觉优先：UI-TARS 定位直接点；UI-TARS 未命中才回退 page_source 关键字（兜底）。
+        （酷狗自绘文字不进无障碍树，故视觉为主、XML 为兜底。）"""
         shot = self._shot()
         w, h = self.dev.screen_size()
         xy = await self.vis.locate(shot, instruction, w, h)
         if xy:
             self.dev.tap(*xy)
+            return True
+        hit = parsers.find_keyword_bounds(self.dev.page_source(), keywords)
+        if hit:
+            self.dev.tap(*hit)
             return True
         return False
 
@@ -47,7 +47,7 @@ class KugouAdsAgent:
 
     async def navigate_to_ads_page(self) -> bool:
         for _ in range(5):
-            if await self._tap_keyword_or_vision(ENTRY_KEYWORDS, "点击进入看广告领VIP听歌时长的入口"):
+            if await self._tap_vision_or_keyword("点击进入看广告领VIP听歌时长的入口", ENTRY_KEYWORDS):
                 await self.sleep(2.0)
                 return True
             self.dev.back()
@@ -55,27 +55,26 @@ class KugouAdsAgent:
         return False
 
     async def read_remaining_minutes(self) -> int | None:
-        # 首选：零模型从 page_source XML 直接取时长
-        mins = parsers.extract_duration_from_xml(self.dev.page_source())
-        if mins is not None:
-            return mins
-        # 回退：UI-TARS OCR 读屏
+        # 主路径：UI-TARS OCR 读屏（酷狗自绘文字不进无障碍树）
         shot = self._shot()
         txt = await self.vis.read_text(shot, REMAIN_QUESTION)
-        return parsers.parse_duration_to_minutes(txt)
+        mins = parsers.parse_duration_to_minutes(txt)
+        if mins is not None:
+            return mins
+        # 兜底：扫 page_source XML
+        return parsers.extract_duration_from_xml(self.dev.page_source())
 
     async def watch_one_ad(self) -> bool:
-        if not await self._tap_keyword_or_vision(WATCH_KEYWORDS, "点击『看广告』按钮开始看广告"):
+        if not await self._tap_vision_or_keyword("点击『看广告』按钮开始看广告", WATCH_KEYWORDS):
             return False
         await self.sleep(35.0)   # 广告 ≤60s，先等一段
-        # 轮询找关闭按钮，最多再等 40s
+        # 轮询找关闭按钮，最多再等 40s（视觉优先，XML 兜底）
         for _ in range(8):
             shot = self._shot()
             w, h = self.dev.screen_size()
-            xml = self.dev.page_source()
-            hit = parsers.find_keyword_bounds(xml, CLOSE_KEYWORDS)
+            hit = await self.vis.locate(shot, "点击右上角关闭广告的×按钮", w, h)
             if not hit:
-                hit = await self.vis.locate(shot, "点击右上角关闭广告的×按钮", w, h)
+                hit = parsers.find_keyword_bounds(self.dev.page_source(), CLOSE_KEYWORDS)
             if hit:
                 self.dev.tap(*hit)
                 await self.sleep(2.0)

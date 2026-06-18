@@ -1,4 +1,6 @@
 """Appium(UiAutomator2) 驱动封装。"""
+import threading
+
 from appium import webdriver
 from appium.options.android import UiAutomator2Options
 from appium.webdriver.extensions.android.nativekey import AndroidKey
@@ -10,6 +12,7 @@ class Device:
         self.appium_url = appium_url
         self.pkg = pkg
         self.driver = None
+        self._xml_disabled = False  # page_source 一次超时后本会话停用，避免反复阻塞
 
     def start(self) -> None:
         opts = UiAutomator2Options()
@@ -60,13 +63,28 @@ class Device:
     def swipe(self, x1: int, y1: int, x2: int, y2: int, ms: int = 400) -> None:
         self.driver.swipe(x1, y1, x2, y2, ms)
 
-    def page_source(self) -> str:
-        """取无障碍树 XML。万一底层 dump 失败（重界面偶发），返回空串，
-        让上层自动 fallback 到 UI-TARS 视觉定位（防御纵深）。"""
-        try:
-            return self.driver.page_source
-        except Exception:  # noqa: BLE001
+    def page_source(self, timeout: float = 6.0) -> str:
+        """取无障碍树 XML（仅作 UI-TARS 视觉的兜底）。带短超时：酷狗重界面上全树
+        dump 可能卡 88s 并拖垮会话；一旦超时即本会话停用 XML（返回空串），让上层
+        全程走视觉，避免反复阻塞。"""
+        if self._xml_disabled or self.driver is None:
             return ""
+        box = {}
+
+        def _get():
+            try:
+                box["v"] = self.driver.page_source
+            except Exception:  # noqa: BLE001
+                box["v"] = ""
+
+        t = threading.Thread(target=_get, daemon=True)
+        t.start()
+        t.join(timeout)
+        if "v" not in box:
+            # 超时：底层请求仍在后台跑，本会话不再尝试 XML
+            self._xml_disabled = True
+            return ""
+        return box["v"]
 
     def activate_app(self) -> None:
         self.driver.activate_app(self.pkg)

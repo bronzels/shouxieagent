@@ -13,8 +13,10 @@
 - 单次广告时长 **≤ 60 秒**；**无累计上限**，14 小时目标可达。
 - GUI 识别：**只用 UI-TARS 这一类 GUI grounding 模型**，不引入独立文字大模型。
   - 本任务无需理解大段文字（这是 web 投简历任务才需要、才借鉴文字模型的；本任务只是点按钮 + 读一小段时长），因此**不照搬 web 的 OpenRouter 文字/多模态模型链**（`VERIFY_MODELS_*`）。借鉴的是「截图→定位→点击」骨架，而非全盘复制。
-  - **点击定位**：本地 UI-TARS（`http://192.168.3.14:8000/v1`，OpenAI 兼容）做坐标 grounding。
-  - **读 VIP 剩余时长**：首选从 page_source（UiAutomator2 无障碍树 XML）的 `text` 属性直接取，**零模型、精确**；拿不到时（自绘 View/WebView 不暴露文字）才回退给同一本地 UI-TARS 发「读出图中剩余时长」的 OCR 问题（UI-TARS 基于 Qwen2.5-VL，可读字，仍属同类模型）。
+  - **⚠️ 真机实测发现（2026-06-18）：酷狗几乎不把文字暴露到无障碍树**（整屏仅 1 个 TextView，文字全自绘），且 page_source 在其重界面（首页信息流）上要 88 秒还会把 UiAutomator2 instrumentation 拖崩。**因此 page_source 不能作主路径**，架构改为**视觉优先、XML 兜底**。
+  - **点击定位**：本地 UI-TARS（`http://192.168.3.14:8000/v1`，OpenAI 兼容）做坐标 grounding（**主路径**）；UI-TARS 返回 None 时才回退查 page_source 关键字（兜底）。
+  - **读 VIP 剩余时长**：**主路径**给本地 UI-TARS 发「读出图中剩余时长」的 OCR 问题（UI-TARS 基于 Qwen2.5-VL，实测能准确读出酷狗自绘文字）；解析失败时才回退查 page_source XML（兜底）。
+  - **page_source 防护**：带短超时（默认 6s），**一次超时后本会话停用 XML**（返回空串），避免重界面 88s 阻塞拖垮主流程；上层据此全程走视觉。
   - **fallback**：本地 UI-TARS 不可达 → OpenRouter 上的同款 `bytedance/ui-tars-1.5-7b`（同模型换托管，不是换成文字模型）。
   - 借鉴的函数骨架来自 `automation/web/zhipin_apply.py`：`call_uitars()`、`parse_uitars_action()`（输出 0-1 归一化坐标）、本地 server 调用方式、`UITARS_LOCAL_URL`。
 - 遵守 `AGENTS.md`：隔离环境（测试代码跑在根目录 `.venv`）、TDD 铁律、测试前后清理数据、中文输出、任务完成 git commit/push。
@@ -40,13 +42,12 @@
 ## 3. 代码分层（`automation/mobile/`）
 
 - **`device.py`** — Appium(UiAutomator2) 驱动封装：
-  - `screenshot(path)`、`tap(x, y)`、`tap_norm(nx, ny)`（0-1 归一化 → 像素）、`swipe(...)`、`back()`
-  - `page_source()` 取 XML、`find_by_text(substr)` / `find_by_resource_id(rid)`
-  - `activate_app(pkg)`、`current_activity()`、`screen_size()`
+  - `screenshot(path)`、`tap(x, y)`、`swipe(...)`、`back()`、`activate_app()`、`current_package()`、`screen_size()`
+  - 建会话即 `update_settings(waitForIdleTimeout=0, ignoreUnimportantViews=true)`；`skipServerInstallation/skipDeviceInitialization=true`（辅助 APK 由 setup.sh 预装，避免反复弹安装框）。
+  - `page_source()`：带短超时（默认 6s）的无障碍树 XML，**一次超时后本会话停用并返回空串**（防 88s 阻塞）。仅作兜底。
 - **`vision.py`** — 只封装 UI-TARS（本地优先 + OpenRouter 同款 fallback），自包含复刻 web 的调用骨架（不 import zhipin_apply，避免 pyautogui/playwright 依赖）：
-  - `locate(screenshot_path, 指令, w, h) -> (px, py) | None`：本地 UI-TARS 出归一化坐标 → 像素，失败 fallback OpenRouter 同款 ui-tars；底层调 `call_uitars` + 坐标解析。
-  - `read_text(screenshot_path, 问题) -> str`：**UI-TARS OCR 兜底**（仅当 page_source 拿不到时长文字才用），给本地 UI-TARS 发普通 OCR 问题；不使用独立文字/多模态模型链。
-  - 读 VIP 时长的**首选路径不在 vision.py**，而在 `agent` 直接读 page_source XML（见 §4.4）。
+  - `locate(screenshot_path, 指令, w, h) -> (px, py) | None`：本地 UI-TARS 出归一化坐标（传**真实图像宽高**做 origin 维度，再 → 像素并夹到屏内），失败 fallback OpenRouter 同款 ui-tars。**点击定位主路径。**
+  - `read_text(screenshot_path, 问题) -> str`：给本地 UI-TARS 发普通 OCR 问题读屏；不使用独立文字/多模态模型链。**读 VIP 时长主路径**（酷狗自绘文字实测可准确读出）。
 - **`agent.py`** — 主循环（鲁棒性核心，见 §4）。
 - **`kugou_vip_ads.py`** — CLI 入口。参数：
   - `--target-hours`（默认 14）
@@ -60,12 +61,12 @@
 ## 4. 「任何屏幕/任何 app 状态都能完成」的鲁棒逻辑（`agent.py`）
 
 1. **状态归位**：启动先无条件 `activate_app("com.kugou.android")`，把酷狗强制拉到前台（覆盖「在别的 app / 锁屏后 / 停在酷狗某深层页」各种情况）。必要时多按几次 `back()` 回到主界面再导航。
-2. **导航找入口**：截图 → 先用 page source 文本匹配关键字（「看广告」「免费听歌」「VIP」「领时长」「畅听」）命中直接点；未命中用 UI-TARS 视觉兜底定位（**复刻 web 的「选择器优先 + 视觉兜底」**）→ 进入「看广告领 VIP 时长」页。
+2. **导航找入口**：截图 → **UI-TARS 视觉定位**入口（「看广告/免费听歌/领时长」）直接点（主路径）；UI-TARS 未命中才回退查 page_source 关键字（兜底）→ 进入「看广告领 VIP 时长」页。（酷狗无障碍树无文字，故视觉为主，与原「选择器优先」相反。）
 3. **看广告循环**（单次循环）：
    - 点「看广告」按钮 → 进入广告（≤60 秒）。
    - 轮询截图判断广告进行中/结束；广告结束后定位右上角关闭「×」（视觉定位优先，结合 page source）→ 关闭回到奖励页。
    - 处理「广告加载失败 / 无广告可看 / 弹窗」等异常：重试或返回奖励页。
-4. **读时长 & 停止条件**：每轮读页面显示的「VIP / 免费畅听剩余时长」——**首选直接扫 page_source XML 的 `text` 节点**（零模型、精确），用 `parse_duration_to_minutes` 解析；XML 取不到才回退 `vision.read_text`（UI-TARS OCR）。**剩余时长 ≥ 14 小时即停**。达到 `--max-ads` 安全上限也停（打印告警，说明被安全上限截断）。
+4. **读时长 & 停止条件**：每轮读页面显示的「VIP / 免费畅听剩余时长」——**主路径用 `vision.read_text`（UI-TARS OCR）**读屏再 `parse_duration_to_minutes` 解析；解析失败才回退扫 page_source XML（兜底）。**剩余时长 ≥ 14 小时即停**。达到 `--max-ads` 安全上限也停（打印告警，说明被安全上限截断）。
 5. **可观测性**：关键节点存截图到 `automation/mobile/reports/screenshots/`；每轮打印当前剩余时长进度。
 
 ---

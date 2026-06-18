@@ -23,6 +23,20 @@
 
 ---
 
+## 实测修订（2026-06-18，真机 vivo + 酷狗）
+
+执行 Task 7 时真机实测发现，以下与原计划不同，已据实调整（代码为准）：
+
+1. **架构转为视觉优先、XML 兜底**（原为「选择器优先 + 视觉兜底」）。原因：酷狗几乎不把文字暴露到无障碍树（整屏仅 1 个 TextView，文字全自绘），且 page_source 在其首页信息流上要 88s 并把 UiAutomator2 instrumentation 拖崩。实测 UI-TARS 截图定位/读字均好用。
+   - `agent._tap_vision_or_keyword(instruction, keywords)`：UI-TARS 定位为主，page_source 关键字为兜底。
+   - `agent.read_remaining_minutes()`：UI-TARS `read_text` OCR 为主，`extract_duration_from_xml` 为兜底。
+2. **device.page_source(timeout=6.0)**：带短超时，一次超时即本会话停用（`_xml_disabled`）返回空串，防 88s 阻塞。
+3. **device.start()**：建会话即 `update_settings(waitForIdleTimeout=0, ignoreUnimportantViews=true)`；加 `skipServerInstallation/skipDeviceInitialization=true`（辅助 APK 由 setup.sh 预装），避免 vivo 反复弹安装框（缺 aapt2 读不到版本会每次重装）。
+4. **vision._parse_point(response, width, height)**：必须传真实图像宽高做 origin 维度（原硬编码 1000×1000 导致非方形屏归一化错、坐标越界），结果夹到屏内。
+5. setup.sh 新增 `[3.5/5]` 步：`adb install -r` 预装 io.appium.settings + uiautomator2 server 辅助 APK。
+
+---
+
 ## Task 1: 环境安装 `setup.sh` + `.gitignore`
 
 **Files:**

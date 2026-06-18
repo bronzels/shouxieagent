@@ -53,3 +53,27 @@ async def test_run_stops_at_max_ads():
     agent = KugouAdsAgent(device=dev, vision=vis, sleep=_no_sleep)
     final = await agent.run(target_minutes=840, max_ads=2)
     assert final < 840  # 被 max_ads 截断
+
+
+class BlindVision:
+    """视觉全失败：locate 返回 None、read_text 返回空 → 逼出 XML 兜底路径。"""
+    async def locate(self, image_path, instruction, w, h): return None
+    async def read_text(self, image_path, question): return ""
+
+
+class XmlDevice(FakeDevice):
+    def page_source(self):
+        return ('<hierarchy>'
+                '<node text="看广告" bounds="[0,0][100,100]"/>'
+                '<node text="剩余900分钟" bounds="[0,100][100,200]"/>'
+                '</hierarchy>')
+
+
+@pytest.mark.asyncio
+async def test_xml_fallback_when_vision_blank():
+    """UI-TARS 视觉全空时，回退到 page_source 关键字点击 + XML 时长解析仍能完成。"""
+    dev = XmlDevice()
+    agent = KugouAdsAgent(device=dev, vision=BlindVision(), sleep=_no_sleep)
+    final = await agent.run(target_minutes=840, max_ads=50)
+    assert final >= 840          # 经 XML 兜底读到 900 分钟
+    assert dev.taps               # 经 page_source 关键字命中点击过
