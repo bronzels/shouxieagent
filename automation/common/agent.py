@@ -32,15 +32,17 @@ DEFAULT_AD_SECONDS = 16
 
 
 class KugouAdsAgent:
-    def __init__(self, device, vision, sleep=asyncio.sleep):
+    def __init__(self, device, vision, sleep=asyncio.sleep,
+                 shots_dir="automation/mobile/reports/screenshots"):
         self.dev = device
         self.vis = vision
         self.sleep = sleep
+        self._shots_dir = shots_dir
         self._shot_i = 0
 
     def _shot(self) -> str:
         self._shot_i += 1
-        path = f"automation/mobile/reports/screenshots/run-{self._shot_i:04d}.png"
+        path = os.path.join(self._shots_dir, f"run-{self._shot_i:04d}.png")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         return self.dev.screenshot(path)
 

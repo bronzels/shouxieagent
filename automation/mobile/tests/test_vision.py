@@ -2,6 +2,7 @@ import sys
 import base64
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "common"))
 
 import pytest
 import vision

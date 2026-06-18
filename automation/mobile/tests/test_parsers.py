@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "common"))
 
 from parsers import (parse_duration_to_minutes, norm_to_pixel,
                      find_keyword_bounds, extract_duration_from_xml, decide_action,

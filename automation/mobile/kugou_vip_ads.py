@@ -16,7 +16,9 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "common"))
 
 import vision
 from agent import KugouAdsAgent
