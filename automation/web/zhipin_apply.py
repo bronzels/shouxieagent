@@ -560,7 +560,8 @@ async def _post_uitars_local(payload: dict) -> dict:
     - model 字段：UITARS_LOCAL_MODEL 或自动从 /v1/models 取第一个
     """
     import sys as _sys
-    _sys.path.insert(0, str(Path(__file__).parent / "ui-tars-server"))
+    # ui-tars-server 是 web/desktop/mobile 共用基础设施，位于 automation/（web 的上一级）
+    _sys.path.insert(0, str(Path(__file__).parent.parent / "ui-tars-server"))
     from inference_client import UITarsClient as _UITarsClient
     from openai import OpenAI as _OpenAI
 

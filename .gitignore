@@ -4,8 +4,9 @@ models/
 !models/.gitkeep
 .claude/worktrees/
 automation/web/chrome_profile/
-automation/web/UI-TARS/
-automation/web/UI-TARS-desktop/
+# UI-TARS 共用基础设施（已移回 automation/）
+automation/UI-TARS/
+automation/UI-TARS-desktop/
 *.whl
 automation/web/screenshots/
 automation/web/videos/
@@ -18,5 +19,6 @@ automation/web/jobsdb_profile/
 automation/web/_new_methods.txt
 automation/web/_*.py
 automation/web/zhipin_checkpoint.json
-automation/web/ui-tars-server/.venv/
-automation/web/ui-tars-server/models/
+automation/ui-tars-server/.venv/
+automation/ui-tars-server/models/
+automation/ui-tars-server/.ms_cache/
