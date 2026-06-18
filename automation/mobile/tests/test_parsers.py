@@ -52,11 +52,12 @@ def test_parse_required_seconds():
     assert parse_required_seconds("看 30 秒可得奖励") == 30
     assert parse_required_seconds("免费领取") is None
 
-def test_decide_action_tap_entry():
-    assert decide_action("弹窗里有一个蓝色按钮『点击去浏览』看广告领30分钟")["action"] == "tap"
+def test_decide_action_watch_entry():
+    assert decide_action("弹窗里有蓝色按钮『点击去浏览』看广告领30分钟免费听歌")["action"] == "watch"
 
-def test_decide_action_wait_ad():
-    assert decide_action("正在播放广告，右上角倒计时5秒")["action"] == "wait"
+def test_decide_action_back_treasure_not_watch():
+    # 含『看广告』但属夺宝/红包 → 不应去看广告，应返回
+    assert decide_action("看广告夺宝机会+1，宝箱里有金币现金")["action"] == "back"
 
 def test_decide_action_back_distraction():
     assert decide_action("这是酷狗内测版邀请页面，有立即升级按钮")["action"] == "back"
@@ -70,3 +71,25 @@ def test_decide_action_done_home():
 def test_parse_required_seconds_via_parse_required():
     from parsers import parse_required_seconds as prs
     assert prs("浏览15秒即可领取") == 15
+
+def test_parse_decision_watch():
+    from parsers import parse_decision
+    d = parse_decision("分析后：ACTION=WATCH; LABEL=点击去浏览; SECONDS=15")
+    assert d == {"action": "watch", "label": "点击去浏览", "seconds": 15}
+
+def test_parse_decision_back_no_label():
+    from parsers import parse_decision
+    d = parse_decision("ACTION=BACK; LABEL=无")
+    assert d["action"] == "back" and d["label"] == "" and d["seconds"] is None
+
+def test_parse_decision_invalid_returns_none():
+    from parsers import parse_decision
+    assert parse_decision("这是一段没有结构化动作的描述") is None
+    assert parse_decision("ACTION=FLY") is None
+
+def test_is_distraction_label():
+    from parsers import is_distraction_label
+    assert is_distraction_label("点击后，看5秒可得夺宝机会") is True
+    assert is_distraction_label("马上去用") is True
+    assert is_distraction_label("点击去浏览") is False
+    assert is_distraction_label("") is False

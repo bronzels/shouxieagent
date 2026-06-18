@@ -63,29 +63,68 @@ def parse_required_seconds(text: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+_VALID_ACTIONS = {"watch", "wait", "close", "back", "home", "done"}
+
+
+def parse_decision(text: str) -> dict | None:
+    """解析 UI-TARS 的受限结构化决策输出，形如：
+        ACTION=WATCH; LABEL=点击去浏览; SECONDS=15
+    返回 {"action": <小写动作>, "label": str, "seconds": int|None}；解析不出返回 None。
+    动作语义：watch=点看广告入口并定时观看; wait=广告播放中等待; close=关闭/领取奖励弹窗;
+    back=干扰页返回; home=回主页(重启); done=已在可读时长的稳定页。"""
+    if not text:
+        return None
+    ma = re.search(r"ACTION\s*[=:：]\s*([A-Za-z]+)", text)
+    if not ma:
+        return None
+    action = ma.group(1).lower()
+    if action not in _VALID_ACTIONS:
+        return None
+    ml = re.search(r"LABEL\s*[=:：]\s*([^\n;；]+)", text)
+    label = ml.group(1).strip() if ml else ""
+    if label.lower() in ("none", "无", "n/a", ""):
+        label = ""
+    ms = re.search(r"SECONDS\s*[=:：]\s*(\d+)", text)
+    seconds = int(ms.group(1)) if ms else None
+    return {"action": action, "label": label, "seconds": seconds}
+
+
+_DISTRACTION_RE = re.compile(r"夺宝|宝箱|刮刮乐|抽奖|红包|金币|现金|福利|签到|"
+                             r"马上去用|立即使用|开通|充值|下载|安装|领金|抽\b")
+
+
+def is_distraction_label(label: str) -> bool:
+    """LABEL/按钮文字是否属于与『看广告领听歌时长』无关的干扰项(夺宝/红包/充值等)。
+    用于交叉校验 UI-TARS 把干扰按钮误判成 WATCH 的情况。"""
+    return bool(label) and bool(_DISTRACTION_RE.search(label))
+
+
 def decide_action(description: str) -> dict:
-    """把 UI-TARS 对当前屏幕的文字描述分类成下一步动作（感知→决策，纯函数可单测）。
-    返回 {"action": tap|wait|close|back|done, "label": 期望点击的按钮文字(tap/close时)}。
-    酷狗启动/首页状态多变(开屏广告/内测版/挽留弹窗/夺宝游戏)，据描述里的关键词决策。"""
+    """兜底：当结构化决策解析失败时，用关键词从散文描述里粗分类下一步动作（纯函数可单测）。
+    返回 {"action": watch|wait|close|back|done, "label": 期望点击的按钮文字}。
+    顺序：奖励到账→看广告入口→干扰页返回→正在播广告等待→主页→默认返回。
+    （注意:干扰页判断放在『N秒等待』之前，避免『浏览5秒夺宝』被误判为正在播广告。）"""
     d = description or ""
-    # 1) 正在播放广告 → 等
-    if re.search(r"倒计时|正在播放|广告播放|秒后|加载广告|skip|稍后可关闭|\d+\s*秒", d):
-        return {"action": "wait", "label": ""}
-    # 2) 领取成功/奖励到账 → 关闭奖励弹窗
+    # 1) 领取成功/奖励到账 → 关闭奖励弹窗
     if re.search(r"领取成功|已获得|恭喜|奖励到账|成功领取|获得.*分钟", d):
         return {"action": "close", "label": "关闭"}
-    # 3) 有看广告领时长的入口按钮 → 点它
-    for kw in ["点击去浏览", "去浏览", "看广告领", "看广告", "看视频领", "看视频得",
-               "免费领取", "领取时长", "点击领取", "去观看", "免费听歌"]:
-        if kw in d:
-            return {"action": "tap", "label": kw}
-    # 4) 无关干扰页(内测版邀请/夺宝/刮刮乐/活动/红包/升级) → 返回
-    if re.search(r"内测版|夺宝|刮刮乐|抽奖|红包|活动|立即升级|邀请您|青少年", d):
+    # 2) 有看广告领【听歌时长】的入口 → 点它（须同时含看广告语义+领时长语义，排除夺宝/红包）
+    if (re.search(r"看广告|看视频|点击去浏览|去浏览|观看视频", d)
+            and re.search(r"听歌|畅听|时长|分钟|VIP|会员时长", d)
+            and not re.search(r"夺宝|宝箱|刮刮乐|红包|金币|现金|抽奖", d)):
+        for kw in ["点击去浏览", "去浏览", "看广告领", "看广告", "看视频领", "看视频得", "去观看"]:
+            if kw in d:
+                return {"action": "watch", "label": kw}
+        return {"action": "watch", "label": "看广告"}
+    # 3) 无关干扰页(内测版/夺宝/刮刮乐/活动/红包/升级) → 返回
+    if re.search(r"内测版|夺宝|宝箱|刮刮乐|抽奖|红包|金币|现金|立即升级|邀请您|青少年", d):
         return {"action": "back", "label": ""}
-    # 5) 已在可看到时长的主页/无可操作 → 完成探索(由上层读时长)
-    if re.search(r"主页|推荐|乐库|首页|播放器|我的音乐", d):
+    # 4) 正在播放广告 → 等
+    if re.search(r"倒计时|正在播放|广告播放中|稍后可关闭|跳过广告|\d+\s*秒后", d):
+        return {"action": "wait", "label": ""}
+    # 5) 已在主页/播放器等稳定页 → 完成(由上层读时长/重启再领)
+    if re.search(r"主页|推荐|乐库|首页|播放器|我的音乐|底部导航", d):
         return {"action": "done", "label": ""}
-    # 默认：退一步回到可识别状态
     return {"action": "back", "label": ""}
 
 

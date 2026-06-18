@@ -16,9 +16,18 @@ REMAIN_QUESTION = (
     "只看这个页面有没有明确写着『VIP剩余』『免费畅听剩余』『可免费听X分钟/小时』这类"
     "听歌时长。有就只回答该时长(如『3小时20分』)；没有明确写听歌时长就回答『无』。"
     "绝对不要把金额(元)、夺宝/宝箱倒计时、歌曲时长、当前时间当作听歌时长。")
-DESCRIBE_QUESTION = ("简要描述这个酷狗音乐界面：有哪些按钮和弹窗？是否在播放广告(有无倒计时秒数)？"
-                     "有没有『看广告领时长/点击去浏览/看视频领』等能领免费听歌时长的入口？"
-                     "如果有要求观看的秒数(如『看15秒』)请一并说明。")
+DECIDE_QUESTION = (
+    "你在操作酷狗音乐app，目标是反复『看广告领免费听歌时长』把时长攒够。请只看这张截图，"
+    "用下面固定格式回答一行，不要解释：\n"
+    "ACTION=<WATCH|WAIT|CLOSE|BACK|HOME|DONE>; LABEL=<要点击的按钮文字或无>; SECONDS=<要求观看秒数或0>\n"
+    "判断规则：\n"
+    "- 有『看广告/点击去浏览/看视频』且是领【免费听歌时长/VIP时长】的入口 → WATCH，LABEL填按钮文字，"
+    "SECONDS填要求秒数(如看15秒填15)。\n"
+    "- 广告正在播放、有倒计时还没到 → WAIT。\n"
+    "- 出现『领取/已获得/恭喜』奖励弹窗或广告结束有关闭X → CLOSE，LABEL填关闭或领取。\n"
+    "- 是夺宝/宝箱/刮刮乐/红包/内测版邀请/升级等与领听歌时长无关的页 → BACK。\n"
+    "- 是酷狗主页/播放器等稳定页、没有可领时长入口 → HOME。\n"
+    "- 已经能看到VIP/免费听歌剩余时长且无事可做 → DONE。")
 DEFAULT_AD_SECONDS = 16
 
 
@@ -50,8 +59,19 @@ class KugouAdsAgent:
                 return True
         return False
 
-    async def _describe(self) -> str:
-        return await self.vis.read_text(self._shot(), DESCRIBE_QUESTION)
+    async def _decide(self) -> dict:
+        """感知+决策：UI-TARS 给结构化决策，再用规则(decide_action)交叉校验，
+        防止 UI-TARS 把『夺宝/红包/马上去用』等误判为 WATCH（看广告领听歌时长）。"""
+        raw = await self.vis.read_text(self._shot(), DECIDE_QUESTION)
+        d = parsers.parse_decision(raw)
+        if d is None:
+            d = parsers.decide_action(raw)
+            d.setdefault("seconds", None)
+        elif d["action"] == "watch" and parsers.is_distraction_label(d.get("label", "")):
+            # 复核 WATCH：LABEL 明显是夺宝/红包/充值等干扰项 → 降级为返回
+            d = {"action": "back", "label": "", "seconds": None}
+        d["_raw"] = (raw or "")[:80]
+        return d
 
     async def _close_ad(self) -> bool:
         return await self._locate_tap("点击右上角关闭广告的×按钮，或『领取奖励/完成』按钮",
@@ -86,11 +106,11 @@ class KugouAdsAgent:
 
     async def watch_one_ad(self) -> bool:
         """点看广告入口 → 按要求秒数定时看够 → 关闭。"""
-        desc = await self._describe()
+        d = await self._decide()
         if not await self._locate_tap("点击『看广告/点击去浏览/看视频领时长』按钮开始看广告",
                                       WATCH_KEYWORDS):
             return False
-        secs = parsers.parse_required_seconds(desc) or DEFAULT_AD_SECONDS
+        secs = (d.get("seconds") or DEFAULT_AD_SECONDS)
         await self.sleep(secs + 3)        # 定时看够要求秒数(+缓冲)，不死等
         for _ in range(4):                 # 关闭/领取，最多重试几次
             if await self._close_ad():
@@ -108,29 +128,38 @@ class KugouAdsAgent:
         ads = 0
         steps = 0
         max_steps = max(30, max_ads * 6)
+        stale_home = 0   # 连续 home/done 次数，过多则重启换状态
         while remaining < target_minutes and ads < max_ads and steps < max_steps:
             steps += 1
-            desc = await self._describe()
-            decision = parsers.decide_action(desc)
+            decision = await self._decide()
             act = decision["action"]
-            print(f"  · step{steps}: {act} | {desc[:60]}", flush=True)
-            if act == "tap":
-                secs = parsers.parse_required_seconds(desc) or DEFAULT_AD_SECONDS
-                if await self._locate_tap(f"点击『{decision['label']}』按钮", WATCH_KEYWORDS):
+            print(f"  · step{steps}: {act} (label={decision.get('label','')}) | {decision.get('_raw','')}",
+                  flush=True)
+            if act == "watch":
+                secs = (decision.get("seconds") or DEFAULT_AD_SECONDS)
+                label = decision.get("label") or "看广告"
+                if await self._locate_tap(f"点击『{label}』按钮看广告领免费听歌时长", WATCH_KEYWORDS):
                     await self.sleep(secs + 3)   # 定时看够，不死等
                     await self._close_ad()
                     ads += 1
+                stale_home = 0
             elif act == "wait":
                 await self.sleep(5.0)
             elif act == "close":
                 await self._close_ad()
+                stale_home = 0
             elif act == "back":
                 self.dev.back()
                 await self.sleep(1.5)
-            elif act == "done":
-                # 已在主页/无可点 → 重启酷狗，重新触发看广告领时长入口
+                stale_home = 0
+            else:  # home / done：稳定页无可领入口 → 重启酷狗重新触发看广告领时长入口
+                stale_home += 1
                 self.dev.activate_app()
-                await self.sleep(2.0)
+                await self.sleep(2.5)
+                if stale_home >= 3:
+                    # 多次回到主页仍无入口：尝试导航一次
+                    await self.navigate_to_ads_page()
+                    stale_home = 0
             new_remaining = await self.read_remaining_minutes()
             if new_remaining is not None:
                 remaining = new_remaining
