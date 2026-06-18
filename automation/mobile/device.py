@@ -1,29 +1,28 @@
-"""Appium(UiAutomator2) 驱动封装。
+"""设备驱动封装（纯 adb 实现）。
 
-注：酷狗会把 UiAutomator2 instrumentation 的 screenshot/getPageSource 拖到 50-88s 并崩溃，
-因此**截图改走 `adb screencap`**（稳定 1s 级，绕开崩溃），其余控制(tap/activate/back/
-screen_size)仍走 Appium。page_source 带短超时仅作兜底。"""
+酷狗会把 Appium/UiAutomator2 instrumentation 的 screenshot/tap/getPageSource 拖到 50-88s
+并崩溃，故弃用 Appium，全程走 adb 原语（实测 screencap~1.2s、input tap~0.18s 稳定）。
+page_source 改用 `adb shell uiautomator dump`，仅作 UI-TARS 视觉的兜底，带短超时防挂死。
+"""
 import os
+import re
 import shutil
 import subprocess
 import threading
 
-from appium import webdriver
-from appium.options.android import UiAutomator2Options
-from appium.webdriver.extensions.android.nativekey import AndroidKey
+# Windows 下隐藏子进程控制台窗口
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 class Device:
-    def __init__(self, appium_url: str = "http://127.0.0.1:4723",
-                 pkg: str = "com.kugou.android"):
-        self.appium_url = appium_url
+    def __init__(self, serial: str | None = None, pkg: str = "com.kugou.android"):
         self.pkg = pkg
-        self.driver = None
+        self._serial = serial
         self._xml_disabled = False  # page_source 一次超时后本会话停用，避免反复阻塞
-        self._serial = None         # adb 设备序列号(截图用)
+        self._size = None
 
     @staticmethod
-    def _adb_path() -> str:
+    def _adb_bin() -> str:
         p = shutil.which("adb")
         if p:
             return p
@@ -31,97 +30,99 @@ class Device:
                             ".tools", "platform-tools", "adb.exe")
         return cand if os.path.exists(cand) else "adb"
 
+    def _args(self, *a) -> list:
+        base = [self._adb_bin()]
+        if self._serial:
+            base += ["-s", self._serial]
+        return base + list(a)
+
+    def _run(self, *a, timeout: float = 30.0, binary: bool = False):
+        # adb 输出为 UTF-8；Windows 默认 gbk 解码会在含非 gbk 字节时崩溃，强制 utf-8/replace
+        kw = dict(capture_output=True, timeout=timeout, creationflags=_NO_WINDOW)
+        if not binary:
+            kw.update(text=True, encoding="utf-8", errors="replace")
+        return subprocess.run(self._args(*a), **kw)
+
+    def _out(self, *a, timeout: float = 30.0) -> str:
+        r = self._run(*a, timeout=timeout)
+        return (r.stdout or "") if r.returncode == 0 else ""
+
+    # ---- 生命周期 ----
     def start(self) -> None:
-        opts = UiAutomator2Options()
-        opts.platform_name = "Android"
-        opts.automation_name = "UiAutomator2"
-        # 不指定 appPackage/appActivity，连当前会话；用 activate_app 控制前台
-        opts.no_reset = True
-        opts.new_command_timeout = 600
-        # vivo/Funtouch 等 ROM 偶发安装辅助 APK 慢，放宽超时
-        opts.set_capability("uiautomator2ServerInstallTimeout", 120000)
-        opts.set_capability("adbExecTimeout", 120000)
-        # vivo 等无「USB安装」开关的 ROM：辅助 APK 已由 setup.sh 预装(adb install)，
-        # 这里跳过 Appium 的服务安装与设备初始化(否则因缺 aapt2 读不到版本而每次重装、
-        # 反复弹安装授权)。前提:setup.sh 已成功预装 io.appium.settings + uiautomator2 server。
-        opts.set_capability("skipServerInstallation", True)
-        opts.set_capability("skipDeviceInitialization", True)
-        self.driver = webdriver.Remote(self.appium_url, options=opts)
-        try:
-            self._serial = self.driver.capabilities.get("deviceUDID")
-        except Exception:  # noqa: BLE001
-            self._serial = None
-        # 关键：酷狗开屏广告等带连续动画+超大视图树的页面，UiAutomator2 默认会
-        # 等界面 idle 再全量序列化，导致 getPageSource 卡 45s 并把 instrumentation 拖崩。
-        # 关掉 idle 等待 + 只 dump 重要视图，page_source 即可秒回不崩。
-        try:
-            self.driver.update_settings({
-                "waitForIdleTimeout": 0,
-                "ignoreUnimportantViews": True,
-            })
-        except Exception:  # noqa: BLE001
-            pass
+        # 选设备：未指定 serial 且有多台时取第一台 device
+        if not self._serial:
+            out = self._out("devices", timeout=10)
+            devs = [ln.split("\t")[0] for ln in out.splitlines()[1:]
+                    if ln.strip().endswith("device")]
+            if not devs:
+                raise RuntimeError("adb 未发现已授权的设备（adb devices 为空）")
+            self._serial = devs[0]
+        self._size = self.screen_size()
 
     def quit(self) -> None:
-        if self.driver:
-            self.driver.quit()
-            self.driver = None
+        pass  # 纯 adb，无会话需清理
 
+    # ---- 基础信息 ----
     def screen_size(self) -> tuple[int, int]:
-        s = self.driver.get_window_size()
-        return (s["width"], s["height"])
+        if self._size:
+            return self._size
+        out = self._out("shell", "wm", "size", timeout=10)
+        m = re.search(r"(\d+)\s*x\s*(\d+)", out)
+        if not m:
+            raise RuntimeError(f"无法解析屏幕尺寸: {out!r}")
+        self._size = (int(m.group(1)), int(m.group(2)))
+        return self._size
 
+    def current_package(self) -> str:
+        out = self._out("shell", "dumpsys", "activity", "activities", timeout=10)
+        m = re.search(r"mResumedActivity.*?\{[^}]*\s(\S+)/", out)
+        if m:
+            return m.group(1)
+        out = self._out("shell", "dumpsys", "window", timeout=10)
+        m = re.search(r"mCurrentFocus=.*?\s(\S+)/", out)
+        return m.group(1) if m else ""
+
+    # ---- 操作 ----
     def screenshot(self, path: str) -> str:
-        """用 adb screencap 截图(绕开 UiAutomator2 在酷狗上崩溃的 screenshot)。
-        失败时退回 Appium 截图。"""
-        try:
-            args = [self._adb_path()]
-            if self._serial:
-                args += ["-s", self._serial]
-            args += ["exec-out", "screencap", "-p"]
+        r = self._run("exec-out", "screencap", "-p", timeout=30, binary=True)
+        if r.returncode == 0 and r.stdout:
             with open(path, "wb") as f:
-                subprocess.run(args, stdout=f, timeout=30, check=True)
-            if os.path.getsize(path) > 0:
-                return path
-        except Exception:  # noqa: BLE001
-            pass
-        self.driver.get_screenshot_as_file(path)
+                f.write(r.stdout)
         return path
 
     def tap(self, x: int, y: int) -> None:
-        self.driver.tap([(x, y)])
+        self._run("shell", "input", "tap", str(int(x)), str(int(y)), timeout=15)
 
     def back(self) -> None:
-        self.driver.press_keycode(AndroidKey.BACK)
+        self._run("shell", "input", "keyevent", "4", timeout=15)
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, ms: int = 400) -> None:
-        self.driver.swipe(x1, y1, x2, y2, ms)
+        self._run("shell", "input", "swipe", str(int(x1)), str(int(y1)),
+                  str(int(x2)), str(int(y2)), str(int(ms)), timeout=15)
 
+    def activate_app(self) -> None:
+        self._run("shell", "monkey", "-p", self.pkg,
+                  "-c", "android.intent.category.LAUNCHER", "1", timeout=20)
+
+    # ---- 兜底：无障碍树 XML（带超时，一次超时即停用）----
     def page_source(self, timeout: float = 6.0) -> str:
-        """取无障碍树 XML（仅作 UI-TARS 视觉的兜底）。带短超时：酷狗重界面上全树
-        dump 可能卡 88s 并拖垮会话；一旦超时即本会话停用 XML（返回空串），让上层
-        全程走视觉，避免反复阻塞。"""
-        if self._xml_disabled or self.driver is None:
+        if self._xml_disabled:
             return ""
         box = {}
 
         def _get():
             try:
-                box["v"] = self.driver.page_source
+                self._run("shell", "uiautomator", "dump", "/sdcard/u2dump.xml",
+                          timeout=timeout)
+                box["v"] = self._out("shell", "cat", "/sdcard/u2dump.xml",
+                                     timeout=timeout)
             except Exception:  # noqa: BLE001
                 box["v"] = ""
 
         t = threading.Thread(target=_get, daemon=True)
         t.start()
-        t.join(timeout)
+        t.join(timeout + 2.0)
         if "v" not in box:
-            # 超时：底层请求仍在后台跑，本会话不再尝试 XML
             self._xml_disabled = True
             return ""
-        return box["v"]
-
-    def activate_app(self) -> None:
-        self.driver.activate_app(self.pkg)
-
-    def current_package(self) -> str:
-        return self.driver.current_package or ""
+        return box.get("v") or ""

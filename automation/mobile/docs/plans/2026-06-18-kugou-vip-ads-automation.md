@@ -33,7 +33,18 @@
 2. **device.page_source(timeout=6.0)**：带短超时，一次超时即本会话停用（`_xml_disabled`）返回空串，防 88s 阻塞。
 3. **device.start()**：建会话即 `update_settings(waitForIdleTimeout=0, ignoreUnimportantViews=true)`；加 `skipServerInstallation/skipDeviceInitialization=true`（辅助 APK 由 setup.sh 预装），避免 vivo 反复弹安装框（缺 aapt2 读不到版本会每次重装）。
 4. **vision._parse_point(response, width, height)**：必须传真实图像宽高做 origin 维度（原硬编码 1000×1000 导致非方形屏归一化错、坐标越界），结果夹到屏内。
-5. setup.sh 新增 `[3.5/5]` 步：`adb install -r` 预装 io.appium.settings + uiautomator2 server 辅助 APK。
+5. ~~setup.sh 新增 `[3.5/5]` 步：`adb install -r` 预装辅助 APK。~~（见第 6 条，已弃用 Appium）
+6. **弃用 Appium，device.py 改为纯 adb 实现**（用户决策）。原因：酷狗把 Appium/UiAutomator2
+   instrumentation 的 screenshot(50s崩)/tap(performActions崩)/getPageSource(88s崩) 全部拖崩，
+   而 adb 原语稳定（screencap~1.2s、input tap~0.18s）。
+   - `device.py` 用 adb：`exec-out screencap -p`(截图)、`input tap/keyevent 4/swipe`(操作)、
+     `monkey -c LAUNCHER`(启动)、`wm size`(屏幕)、`dumpsys activity activities`(当前包)、
+     `uiautomator dump`(page_source 兜底，带超时)。**不再建 Appium 会话、不需辅助 APK。**
+   - subprocess 强制 `encoding=utf-8, errors=replace`（Windows gbk 解码 adb UTF-8 输出会崩）。
+   - `Device(serial=None, pkg=...)`；CLI `--appium-url` 改为 `--serial`。
+   - setup.sh 简化为 [1/3]adb [2/3]Python依赖(ui_tars/openai/httpx/pytest) [3/3]自检；
+     去掉 Appium Server/uiautomator2 驱动/JDK/辅助 APK 预装。
+   - 集成测试改为 adb 在线判断 + 4 用例（屏幕尺寸/adb截图/拉起酷狗/page_source有界）。
 
 ---
 

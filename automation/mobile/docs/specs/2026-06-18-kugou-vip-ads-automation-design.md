@@ -6,6 +6,13 @@
 
 ---
 
+> **⚠️ 重大实测修订（2026-06-18，真机 vivo + 酷狗）：已弃用 Appium，改为纯 adb 驱动。**
+> 酷狗会把 Appium/UiAutomator2 instrumentation 的 screenshot(50s崩)/tap(performActions崩)/
+> getPageSource(88s崩) 全部拖崩，而 adb 原语稳定（screencap~1.2s、input tap~0.18s）。经用户决策，
+> `device.py` 全程走 adb：`screencap`(截图)、`input tap/keyevent/swipe`(操作)、`monkey`(启动)、
+> `wm size`(屏幕)、`dumpsys activity activities`(当前包)、`uiautomator dump`(page_source 兜底)。
+> 不再建 Appium 会话、不需辅助 APK。下文凡提及 Appium/UiAutomator2 作驱动处，以此修订为准。
+
 ## 1. 背景与约束
 
 - 手机：Android 真机，已 USB 连接、已开启 USB 调试，adb 可识别。

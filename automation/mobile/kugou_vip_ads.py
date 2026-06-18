@@ -24,7 +24,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--uitars-local-url", default="http://192.168.3.14:8000/v1",
                    help="本地 UI-TARS server 地址（/v1 前缀）")
     p.add_argument("--max-ads", type=int, default=100, help="安全上限：最多看多少次广告")
-    p.add_argument("--appium-url", default="http://127.0.0.1:4723")
+    p.add_argument("--serial", default=None, help="adb 设备序列号（多设备时指定，默认取第一台）")
     p.add_argument("--pkg", default="com.kugou.android", help="酷狗包名")
     p.add_argument("--dry-run", action="store_true",
                    help="只归位+导航+读当前时长，不真正看广告")
@@ -33,7 +33,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 async def main_async(args) -> int:
     vision.configure(args.openrouter_key, args.uitars_local_url)
-    dev = Device(appium_url=args.appium_url, pkg=args.pkg)
+    dev = Device(serial=args.serial, pkg=args.pkg)
     dev.start()
     try:
         agent = KugouAdsAgent(device=dev, vision=vision)
