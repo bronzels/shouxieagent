@@ -201,6 +201,20 @@ class KugouAdsAgent:
             await self.sleep(2.0)
         return self._in_kugou()
 
+    async def _recover_to_center(self, max_steps: int = 6) -> bool:
+        """卡在非奖励中心页(会员权益/分享/详情等)时的通用恢复：
+        反复点左上角『<』返回(系统back)逐层退出，检测到回到『免费听歌中心』就停；
+        若退到了酷狗主页则重新点『免』图标进中心。返回是否成功回到中心。"""
+        for _ in range(max_steps):
+            if await self._on_ads_center():
+                return True
+            if await self._on_kugou_home():       # 退到主页了 → 重新进中心
+                if await self.navigate_to_ads_page():
+                    return True
+            self.dev.back()                        # = 点左上角『<』返回上一页
+            await self.sleep(1.3)
+        return await self._on_ads_center()
+
     # ---- 兼容旧接口（单元测试用）----
     async def reset_to_kugou_home(self) -> None:
         """归位到酷狗【主页】。activate_app 常恢复到上次的子页(如排行榜/搜索)，
@@ -306,8 +320,9 @@ class KugouAdsAgent:
                     # 【铁律】点广告自带的关闭X领奖，绝不用返回键(返回=放弃奖励、白看广告)
                     on_center = await self._close_ad_landing()
                     await self._handle_giveup_popup(secs)   # 关闭时若再弹挽留，再继续浏览一次
-                    if not on_center and not await self._on_ads_center():
-                        await self.navigate_to_ads_page()   # 没回到中心就重新导航回去
+                    if not on_center:
+                        # 看完广告可能误入会员权益/分享/详情页 → 反复『<』返回回到中心
+                        await self._recover_to_center()
                     ads += 1
                     # 累计够任务数后会出现领取按钮 → 领奖（中途时长不涨是正常的）
                     if await self._try_claim_reward():
@@ -339,6 +354,11 @@ class KugouAdsAgent:
                 print(f"    (忽略疑似误读 {new_remaining} 分钟，保持 {remaining})", flush=True)
             print(f"  ▶ 已看 {ads} 次广告，当前剩余: {remaining} 分钟 (目标 {target_minutes})",
                   flush=True)
+            # 每轮兜底：判断是否卡在非中心页(误入会员权益/分享/详情等)，卡住就反复『<』返回回中心。
+            # (已在中心则 _on_ads_center 直接 True、是廉价 no-op)
+            if not await self._on_ads_center():
+                print("    (检测到不在中心页，尝试返回回到免费听歌中心)", flush=True)
+                await self._recover_to_center()
         if remaining >= target_minutes:
             print(f"  ✅ 已达目标，最终剩余 {remaining} 分钟 (≥{target_minutes})", flush=True)
         else:

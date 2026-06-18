@@ -203,6 +203,37 @@ class WrongThenCenterVision:
         return "无"
 
 
+class StuckThenCenterVision:
+    """前 wrong_times 次中心校验为否(卡在子页)，之后为是(回到中心)；主页校验恒否。"""
+    def __init__(self, wrong_times):
+        self.wrong = wrong_times
+        self.checks = 0
+    async def locate(self, image_path, instruction, w, h): return (50, 50)
+    async def read_text(self, image_path, question):
+        if "任务中心" in question:
+            self.checks += 1
+            return "否" if self.checks <= self.wrong else "是"
+        if "主页" in question:
+            return "否"
+        return "无"
+
+
+@pytest.mark.asyncio
+async def test_recover_to_center_backs_until_center():
+    """卡在非中心页时，反复『<』返回(back)直到回到免费听歌中心。"""
+    class BackCountDevice(FakeDevice):
+        def __init__(self):
+            super().__init__()
+            self.backs = 0
+        def back(self): self.backs += 1
+    dev = BackCountDevice()
+    vis = StuckThenCenterVision(wrong_times=2)   # 前2次还在子页，第3次回到中心
+    agent = KugouAdsAgent(device=dev, vision=vis, sleep=_no_sleep)
+    ok = await agent._recover_to_center()
+    assert ok is True
+    assert dev.backs >= 2          # 反复返回退出子页
+
+
 @pytest.mark.asyncio
 async def test_navigate_retries_when_not_on_center():
     """鲁棒性：进错页面(中心校验为否)时 back 退回重试，最终进入中心，而非卡死。"""
