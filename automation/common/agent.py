@@ -26,6 +26,10 @@ GIVEUP_QUESTION = (
 CENTER_QUESTION = (
     "这个页面是不是酷狗的『免费听歌模式』任务中心(顶部有『免费畅听剩余时长』，下方有"
     "『去浏览/去观看』之类看广告领免费听歌时长的任务列表)？只回答『是』或『否』。")
+# 校验是否在酷狗主页(顶部有搜索框和右边的『免』图标入口，不是排行榜/搜索/详情等子页)
+HOME_QUESTION = (
+    "这个页面是不是酷狗音乐的主页(顶部有搜索框、右边有蓝色『免』图标，底部导航『首页』高亮)？"
+    "如果是排行榜/搜索/歌单/详情等带左上角『<』返回箭头的子页面就回答『否』。只回答『是』或『否』。")
 REMAIN_QUESTION = (
     "这个页面顶部『免费畅听剩余时长』显示的数字是多少？它的格式是 分:秒"
     "（例如 533:23 表示还剩 533 分钟 23 秒）。请把这个数字原样回答，如『533:23』，"
@@ -94,6 +98,41 @@ class KugouAdsAgent:
         return await self._locate_tap("点击右上角关闭广告的×按钮，或『领取奖励/完成』按钮",
                                       CLOSE_KEYWORDS)
 
+    # 广告落地页的关闭X位置(占屏比例)：浏览落地页(淘宝/美团)在左上、连续广告流在右上
+    LANDING_CLOSE_FRACTIONS = ((0.15, 0.075), (0.945, 0.106))
+
+    async def _close_ad_landing(self) -> bool:
+        """看完广告/浏览后【点广告自带的关闭X来领取奖励】，绝不能用返回键。
+        实测铁律：用系统返回键(back)关广告=放弃奖励、白看；只有点广告X才真正计入并加时长。
+        X 位置因落地页而异，依次尝试：左上角坐标→视觉定位→右上角坐标，每次用是否回到中心校验。
+        返回 True 表示已回到免费听歌中心(领奖成功)。"""
+        w, h = self.dev.screen_size()
+        fx, fy = self.LANDING_CLOSE_FRACTIONS[0]      # 左上角(浏览落地页, 实测可靠)
+        self.dev.tap(int(w * fx), int(h * fy))
+        await self.sleep(2.0)
+        if await self._on_ads_center():
+            return True
+        # 视觉兜底找关闭X(明确不是左上角返回箭头‹)
+        if await self._locate_tap(
+                "点击关闭这个广告/浏览页面的『X』或『×』关闭按钮以领取免费听歌奖励"
+                "(是关闭按钮，不是左上角的返回箭头‹)", []):
+            await self.sleep(2.0)
+            if await self._on_ads_center():
+                return True
+        fx2, fy2 = self.LANDING_CLOSE_FRACTIONS[1]    # 右上角(连续广告流)
+        self.dev.tap(int(w * fx2), int(h * fy2))
+        await self.sleep(2.0)
+        if await self._on_ads_center():
+            return True
+        # 兜底：所有关闭X都没回到中心 → 直接按返回键逃出避免卡死(本次可能未领到奖励)
+        # (落地页是酷狗内webview, current_package仍是酷狗, 不能靠_in_kugou判断, 直接back)
+        for _ in range(2):
+            self.dev.back()
+            await self.sleep(1.2)
+            if await self._on_ads_center():
+                return True
+        return False
+
     async def _handle_giveup_popup(self, browse_secs: int) -> bool:
         """检测『要放弃免费听歌吗/放弃奖励』挽留弹窗：有就点『继续浏览』保住奖励、再浏览够时间，
         绝不点『坚持退出/放弃』。返回 True 表示处理过弹窗(继续浏览了)。
@@ -113,6 +152,11 @@ class KugouAdsAgent:
     async def _on_ads_center(self) -> bool:
         """是否在『免费听歌模式』任务中心(导航后校验，避免误进搜索/其他页却以为成功)。"""
         ans = await self.vis.read_text(self._shot(), CENTER_QUESTION)
+        return ("是" in ans) and ("否" not in ans) and ("不是" not in ans)
+
+    async def _on_kugou_home(self) -> bool:
+        """是否在酷狗主页(顶部有搜索框+『免』图标，非排行榜/搜索等子页)。"""
+        ans = await self.vis.read_text(self._shot(), HOME_QUESTION)
         return ("是" in ans) and ("否" not in ans) and ("不是" not in ans)
 
     async def _try_claim_reward(self) -> bool:
@@ -143,11 +187,20 @@ class KugouAdsAgent:
 
     # ---- 兼容旧接口（单元测试用）----
     async def reset_to_kugou_home(self) -> None:
+        """归位到酷狗【主页】。activate_app 常恢复到上次的子页(如排行榜/搜索)，
+        此时『免』图标坐标会点空，故连按返回(=点左上角『<』)退出子页直到检测确认回到主页。
+        检测到主页就停，避免在主页多按返回触发退出酷狗。"""
         self.dev.activate_app()
         await self.sleep(2.0)
         if "com.kugou" not in self.dev.current_package():
             self.dev.activate_app()
             await self.sleep(2.0)
+        # 退出任何子页回主页(最多5步)：到主页即停
+        for _ in range(5):
+            if await self._on_kugou_home():
+                return
+            self.dev.back()      # 等同点左上角『<』返回上一页
+            await self.sleep(1.5)
 
     # 「免」图标在主页搜索框右边、屏幕右上角，按屏幕比例定位
     # （UI-TARS 对这个紧贴搜索框的小图标视觉定位不可靠，实测常误点成搜索框→进搜索页，故用坐标）
@@ -234,11 +287,13 @@ class KugouAdsAgent:
                     for _ in range(2):
                         if not await self._handle_giveup_popup(secs):
                             break
-                    await self._close_ad()       # 浏览够了再关闭/领取
+                    # 【铁律】点广告自带的关闭X领奖，绝不用返回键(返回=放弃奖励、白看广告)
+                    on_center = await self._close_ad_landing()
                     await self._handle_giveup_popup(secs)   # 关闭时若再弹挽留，再继续浏览一次
-                    await self._ensure_kugou_foreground()   # 看完回酷狗(批量模式每次+1条)
+                    if not on_center and not await self._on_ads_center():
+                        await self.navigate_to_ads_page()   # 没回到中心就重新导航回去
                     ads += 1
-                    # 批量模式：累计够条数后会出现领取按钮 → 领奖（中途时长不涨是正常的）
+                    # 累计够任务数后会出现领取按钮 → 领奖（中途时长不涨是正常的）
                     if await self._try_claim_reward():
                         print("    🎁 领取了已解锁的奖励", flush=True)
                 stale_home = 0

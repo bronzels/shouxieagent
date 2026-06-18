@@ -32,6 +32,8 @@ class FakeVision:
         self.read_calls = 0
     async def locate(self, image_path, instruction, w, h): return (50, 50)
     async def read_text(self, image_path, question):
+        if "主页" in question:          # _on_kugou_home 校验 → 视为已在主页
+            return "是"
         if "任务中心" in question:      # _on_ads_center 校验 → 视为已在中心
             return "是"
         if "放弃" in question:          # giveup 挽留弹窗检测 → 无弹窗
@@ -153,6 +155,39 @@ async def test_handle_giveup_popup_absent_no_action():
     handled = await agent._handle_giveup_popup(browse_secs=10)
     assert handled is False
     assert dev.taps == []
+
+
+@pytest.mark.asyncio
+async def test_close_ad_landing_taps_corner_X_not_back():
+    """看完广告用广告自带的关闭X(左上角坐标)领奖、回到中心，绝不用返回键。"""
+    dev = FakeDevice()                       # screen 1000x2000
+    agent = KugouAdsAgent(device=dev, vision=FakeVision([0]), sleep=_no_sleep)
+    reached = await agent._close_ad_landing()
+    assert reached is True
+    # 只点了左上角X坐标(0.15*1000, 0.075*2000)，没有走 back 兜底
+    assert dev.taps == [(150, 150)]
+
+
+class StuckLandingVision:
+    """中心校验一直为否(关不掉)，用于验证最终走 back 兜底逃出。"""
+    async def locate(self, image_path, instruction, w, h): return None
+    async def read_text(self, image_path, question): return "否"
+
+
+@pytest.mark.asyncio
+async def test_close_ad_landing_falls_back_to_back_when_stuck():
+    """所有关闭X都没回到中心时，最后用返回键兜底逃出避免卡死。"""
+    class CountBackDevice(FakeDevice):
+        def __init__(self):
+            super().__init__()
+            self.backs = 0
+        def back(self): self.backs += 1
+        def current_package(self): return "com.kugou.android"
+    dev = CountBackDevice()
+    agent = KugouAdsAgent(device=dev, vision=StuckLandingVision(), sleep=_no_sleep)
+    reached = await agent._close_ad_landing()
+    assert dev.backs >= 1        # 兜底用了返回键逃出
+    assert reached is False       # 仍未确认回到中心
 
 
 class WrongThenCenterVision:
