@@ -27,11 +27,16 @@ from device import Device
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="酷狗看广告攒 VIP 听歌时长自动化")
-    p.add_argument("--target-hours", type=float, default=14, help="目标累计时长(小时)，默认14")
+    p.add_argument("--target-hours", type=float, default=14,
+                   help="目标累计时长(小时)，默认14（未指定 --add-hours 时用）")
+    p.add_argument("--add-hours", type=float, default=None,
+                   help="要新增的免费时长(小时)，如3=在当前基础上新增3小时；优先于 --target-hours")
     p.add_argument("--openrouter-key", default=os.environ.get("OPENROUTER_API_KEY", ""),
                    help="OpenRouter API key（默认读环境变量 OPENROUTER_API_KEY）")
     p.add_argument("--uitars-local-url", default="http://192.168.3.14:8000/v1",
-                   help="本地 UI-TARS server 地址（/v1 前缀）")
+                   help="本地 UI-TARS server 地址（/v1 前缀，仅 --use-local 时生效）")
+    p.add_argument("--use-local", action="store_true",
+                   help="也用本地 UI-TARS（默认关闭，只用 OpenRouter）")
     p.add_argument("--max-ads", type=int, default=100, help="安全上限：最多看多少次广告")
     p.add_argument("--serial", default=None, help="adb 设备序列号（多设备时指定，默认取第一台）")
     p.add_argument("--pkg", default="com.kugou.android", help="酷狗包名")
@@ -41,7 +46,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 async def main_async(args) -> int:
-    vision.configure(args.openrouter_key, args.uitars_local_url)
+    # 默认只用 OpenRouter（不连本地 UI-TARS）；--use-local 才本地优先+OpenRouter兜底
+    if args.use_local:
+        vision.configure(args.openrouter_key, args.uitars_local_url, use_local=True)
+    else:
+        vision.configure(args.openrouter_key, use_local=False)
+    print(f"  ▶ 视觉后端: {'本地优先+OpenRouter兜底' if args.use_local else '仅 OpenRouter'}", flush=True)
     dev = Device(serial=args.serial, pkg=args.pkg)
     dev.start()
     try:
@@ -52,7 +62,16 @@ async def main_async(args) -> int:
             mins = await agent.read_remaining_minutes()
             print(f"✅ dry-run：当前剩余时长 {mins} 分钟", flush=True)
             return 0
-        target_minutes = int(round(args.target_hours * 60))
+        if args.add_hours is not None:
+            # 新增语义：读基线 + 新增小时数
+            await agent.reset_to_kugou_home()
+            await agent.navigate_to_ads_page()
+            baseline = await agent.read_remaining_minutes() or 0
+            target_minutes = baseline + int(round(args.add_hours * 60))
+            print(f"  ▶ 当前基线: {baseline} 分钟，目标新增 {int(round(args.add_hours*60))} 分钟"
+                  f" → 目标: {target_minutes} 分钟", flush=True)
+        else:
+            target_minutes = int(round(args.target_hours * 60))
         final = await agent.run(target_minutes=target_minutes, max_ads=args.max_ads)
         return 0 if final >= target_minutes else 2
     finally:
