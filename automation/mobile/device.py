@@ -83,12 +83,30 @@ class Device:
         return m.group(1) if m else ""
 
     # ---- 操作 ----
-    def screenshot(self, path: str) -> str:
-        r = self._run("exec-out", "screencap", "-p", timeout=30, binary=True)
-        if r.returncode == 0 and r.stdout:
-            with open(path, "wb") as f:
-                f.write(r.stdout)
-        return path
+    _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+    def screenshot(self, path: str, retries: int = 3) -> str:
+        """adb screencap 截图，重试 + PNG 校验后写盘。
+
+        实测这台机 screencap 偶发抽风：返回空输出/非零码、或只回 1 字节坏数据。
+        旧实现无论成功与否都 return path，导致下游 open() 不存在/损坏文件而
+        FileNotFoundError 打挂整个任务。这里改为：每次校验输出是有效 PNG(魔数+尺寸)
+        才写盘返回；无效就重试；全部重试失败显式抛错(绝不返回坏路径让下游崩溃)。"""
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        last = ""
+        for _ in range(max(1, retries)):
+            r = self._run("exec-out", "screencap", "-p", timeout=30, binary=True)
+            raw = r.stdout if r.returncode == 0 else b""
+            # 先按原始数据校验(现代 adb exec-out 干净)；不行再试 \r\n→\n 修复
+            # (某些老 ROM 会把 \n 转义成 \r\n 破坏 PNG)。注意 PNG 魔数本身含合法 \r\n，
+            # 不能无条件替换，否则反而破坏魔数。
+            for data in (raw, raw.replace(b"\r\n", b"\n")):
+                if len(data) > 8 and data[:8] == self._PNG_MAGIC:
+                    with open(path, "wb") as f:
+                        f.write(data)
+                    return path
+            last = f"returncode={r.returncode}, bytes={len(r.stdout or b'')}"
+        raise RuntimeError(f"adb screencap 连续 {retries} 次未取到有效 PNG（{last}）")
 
     def tap(self, x: int, y: int) -> None:
         self._run("shell", "input", "tap", str(int(x)), str(int(y)), timeout=15)
