@@ -93,6 +93,17 @@ def test_parse_decision_invalid_returns_none():
     assert parse_decision("这是一段没有结构化动作的描述") is None
     assert parse_decision("ACTION=FLY") is None
 
+def test_parse_decision_clamps_implausible_seconds():
+    # 模型常把页面数字(如『看4条』『还剩1800』)幻觉成观看秒数。
+    # 激励广告不可能要看 1800 秒(30分钟)，超合理上限的 SECONDS 应丢弃为 None，
+    # 让上层回退到 DEFAULT_AD_SECONDS，避免 sleep(secs+5) 傻等半小时卡死。
+    from parsers import parse_decision
+    assert parse_decision("ACTION=WATCH; LABEL=看4条; SECONDS=1800")["seconds"] is None
+    assert parse_decision("ACTION=WATCH; LABEL=看视频; SECONDS=600")["seconds"] is None
+    # 合理范围内的秒数原样保留
+    assert parse_decision("ACTION=WATCH; LABEL=去浏览; SECONDS=30")["seconds"] == 30
+    assert parse_decision("ACTION=WATCH; LABEL=去浏览; SECONDS=120")["seconds"] == 120
+
 def test_parse_watch_progress():
     from parsers import parse_watch_progress
     assert parse_watch_progress("已看2/5条") == (2, 5)

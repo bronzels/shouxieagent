@@ -107,6 +107,9 @@ def classify_task_mode(text: str) -> str:
 
 _VALID_ACTIONS = {"watch", "wait", "close", "back", "home", "done"}
 
+# 激励广告要求观看秒数的合理上限：超过视为模型幻觉(把页面其他数字当成秒数)。
+MAX_PLAUSIBLE_AD_SECONDS = 180
+
 
 def parse_decision(text: str) -> dict | None:
     """解析 UI-TARS 的受限结构化决策输出，形如：
@@ -128,6 +131,11 @@ def parse_decision(text: str) -> dict | None:
         label = ""
     ms = re.search(r"SECONDS\s*[=:：]\s*(\d+)", text)
     seconds = int(ms.group(1)) if ms else None
+    # 钳制：激励广告观看时长极少超过 1~2 分钟，模型常把页面数字(『看4条』『剩1800』)
+    # 幻觉成观看秒数。超合理上限的一律丢弃为 None，让上层回退 DEFAULT_AD_SECONDS，
+    # 避免 run() 里 sleep(secs+5) 傻等半小时卡死。
+    if seconds is not None and seconds > MAX_PLAUSIBLE_AD_SECONDS:
+        seconds = None
     return {"action": action, "label": label, "seconds": seconds}
 
 
