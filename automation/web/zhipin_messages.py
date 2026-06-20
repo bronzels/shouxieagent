@@ -171,19 +171,32 @@ SEL = {
         "button:has-text('发送简历')",
         "[class*='resume']:has-text('简历')",
     ],
-    # 简历选择弹窗里：中文简历选项
+    # 简历选择弹窗"请选择要发送的简历"里：中文简历项（实测文件名以"刘先生的简历"开头）。
+    # ⚠️ 必须点【简历名/文件区】，不要点简历项右侧的"预览"链接（点预览会打开预览界面、
+    #   而正常流程是选中简历后直接点弹窗右下角"发送"，无需预览）。下面选择器尽量精确指向
+    #   文件名文本，避开"预览"。
     "resume_option_cn": [
-        "[class*='resume-item']:has-text('刘先生')",
-        "[class*='resume-list'] li:has-text('中文')",
+        ".resume-item:has-text('刘先生')",
+        "[class*='resume'] [class*='name']:has-text('刘先生')",
+        "[class*='file']:has-text('刘先生')",
+        "[class*='item']:has-text('刘先生的简历')",
+        "li:has-text('刘先生')",
     ],
-    # 简历选择弹窗里：英文简历选项
+    # 简历选择弹窗里：英文简历项（文件名含 AlexLiu / eng）
     "resume_option_en": [
-        "[class*='resume-item']:has-text('English')",
-        "[class*='resume-list'] li:has-text('英文')",
+        ".resume-item:has-text('AlexLiu')",
+        "[class*='file']:has-text('AlexLiu')",
+        "[class*='item']:has-text('AlexLiu')",
+        "li:has-text('English')",
+        "li:has-text('英文')",
     ],
-    # 简历【预览】界面右上方的"发送"按钮（实测：选了简历→打开简历预览→右上角发送才真正发出）。
-    # 放在最前面优先匹配；兼容旧的弹窗确认按钮。
+    # 简历选择弹窗"请选择要发送的简历"【右下角】的绿色"发送"按钮（实测正常流程：
+    # 选中简历→直接点这个发送即发出，不经过预览）。兼容预览界面右上角发送。
     "resume_confirm": [
+        "[class*='dialog'] button:has-text('发送')",
+        "[class*='dialog'] [class*='btn']:has-text('发送')",
+        "[class*='boss-dialog'] button:has-text('发送')",
+        ".btn-send:has-text('发送')",
         "[class*='preview'] button:has-text('发送')",
         "[class*='preview'] :has-text('发送')[class*='btn']",
         "[class*='dialog'] button:has-text('发送')",
@@ -751,30 +764,29 @@ class ZhipinMessageScanner:
             return False
         za.human_delay(1.5, 2.5)
 
-        # 2) 简历选择弹窗里选对应版本
+        # 2) "请选择要发送的简历"弹窗里选对应版本（点简历名/文件区，⚠️不要点右侧"预览"链接）
         option_selectors = SEL["resume_option_en"] if version == RESUME_EN else SEL["resume_option_cn"]
         instruction = (
-            "在弹出的简历选择列表里，找到并点击英文版简历(English/英文)。"
+            "弹窗标题是'请选择要发送的简历'。请点击英文版简历那一【行】(文件名含 AlexLiu/English)，"
+            "点文件名区域选中它，【不要】点该行右侧的'预览'两个字。"
             if version == RESUME_EN else
-            "在弹出的简历选择列表里，找到并点击中文版简历（'刘先生'开头的中文简历）。"
+            "弹窗标题是'请选择要发送的简历'。请点击中文版简历那一【行】(文件名'刘先生的简历'开头)，"
+            "点文件名区域选中它，【不要】点该行右侧的'预览'两个字。"
         )
         ok = await self.click_smart(option_selectors, instruction, f"resume_pick_{version}.png")
         if not ok:
-            # 有些版本可能直接发默认简历、无选择弹窗；记录后仍尝试确认
             print("  [WARN] 未找到简历版本选项（可能无选择弹窗或选择器待确认）", flush=True)
-        za.human_delay(1.0, 2.0)
+        za.human_delay(0.8, 1.5)
 
-        # 3) 简历【预览】界面右上方的"发送"按钮 —— 选了简历后会打开简历预览，
-        #    必须点右上角"发送"才真正发出（实测：之前卡在这一步没点到）。
-        za.human_delay(1.0, 1.8)  # 等预览界面渲染
+        # 3) 点弹窗【右下角】绿色"发送"按钮，真正发出（实测正常流程：选中简历后直接发，无需预览）
         ok_confirm = await self.click_smart(
             SEL["resume_confirm"],
-            "现在屏幕上是简历预览界面，请点击它【右上方】的'发送'按钮，把简历发给对方。",
+            "在'请选择要发送的简历'弹窗里，点击【右下角】的绿色'发送'按钮，把选中的简历发给对方。",
             f"resume_confirm_{version}.png",
         )
         if not ok_confirm:
-            print("  [WARN] 未点到简历预览的'发送'按钮——简历可能未真正发出（待确认选择器）", flush=True)
-            await za.screenshot_page(self.page, f"resume_preview_stuck_{version}.png")
+            print("  [WARN] 未点到弹窗'发送'按钮——简历可能未真正发出（待确认选择器）", flush=True)
+            await za.screenshot_page(self.page, f"resume_send_stuck_{version}.png")
             return False
         za.human_delay(1.5, 2.5)
         print(f"  ✅ 已点击简历预览'发送'，发出【{ver_name}】简历", flush=True)
