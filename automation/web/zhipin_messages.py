@@ -1076,7 +1076,7 @@ def _build_arg_parser():
     parser.add_argument(
         "--uitars-provider", choices=["openrouter", "remote", "local"], default="openrouter",
         help="UI-TARS 模型提供方式：openrouter（默认）/ remote（x-api-key 鉴权的兼容 endpoint）/ "
-             "local（本地推理，暂未实现）。",
+             "local（本地/局域网推理，配合 --uitars-local-url）。",
     )
     parser.add_argument(
         "--uitars-endpoint", default=None,
@@ -1121,11 +1121,12 @@ def main():
 
     if za.UITARS_PROVIDER == "remote" and not za.UITARS_ENDPOINT:
         parser.error("--uitars-provider remote 需要同时指定 --uitars-endpoint")
-    if za.UITARS_PROVIDER == "local":
-        print("⚠️ 本地 UI-TARS 推理方式尚未实现，视觉兜底将被优雅跳过。", flush=True)
+    if args.uitars_local_url:
+        za.UITARS_LOCAL_URL = args.uitars_local_url
 
     print(f"⚙️ UI-TARS 提供方式: {za.UITARS_PROVIDER}"
-          + (f" | endpoint: {za.UITARS_ENDPOINT}" if za.UITARS_PROVIDER == "remote" else ""),
+          + (f" | endpoint: {za.UITARS_ENDPOINT}" if za.UITARS_PROVIDER == "remote" else "")
+          + (f" | local: {za.UITARS_LOCAL_URL}" if za.UITARS_PROVIDER == "local" else ""),
           flush=True)
 
     if args.no_send_resume:
