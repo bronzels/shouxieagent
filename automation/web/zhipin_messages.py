@@ -139,19 +139,34 @@ SEL = {
     ],
     # 聊天消息气泡：对方(BOSS)发的消息（用于判断是否已回复 + 取最后一条文本）
     # Boss直聘消息气泡一般用 .item-friend(对方) / .item-myself(我) 区分。
+    # ⚠️ 取【整条 .item-friend 的全文】而非仅 .text 子节点——因为"索要附件简历"是以
+    # 对话框卡片形式出现（文字"我想要一份您的附件简历，您是否同意"+同意/拒绝按钮），
+    # 卡片文字不在 .text 里，只读 .text 会漏掉这类索要简历意图（实测漏判的根因）。
     "msg_from_other": [
-        ".item-friend .text",
-        "[class*='message'][class*='friend'] .text",
+        ".item-friend",
+        "[class*='message'][class*='friend']",
         ".chat-message .friend",
+    ],
+    # 对话框式索要附件简历卡片里的【同意】按钮（情况1：对方用卡片+按钮索要）。
+    # 点"同意"后会弹出底部简历选择。
+    "resume_agree_btn": [
+        ".item-friend button:has-text('同意')",
+        "[class*='message'] button:has-text('同意')",
+        "[class*='card'] button:has-text('同意')",
+        ".item-friend a:has-text('同意')",
+        "button:has-text('同意')",
     ],
     # 聊天消息气泡：我发的消息
     "msg_from_me": [
         ".item-myself .text",
         "[class*='message'][class*='myself'] .text",
     ],
-    # 「发送简历」入口按钮（聊天窗口工具栏 / 快捷操作里）
+    # 「发简历/发送简历」入口按钮（聊天窗口【上方工具栏】，实测 label 多为"发简历"）
     "send_resume_btn": [
+        "[class*='tool'] >> text=发简历",
         "[class*='toolbar'] >> text=发送简历",
+        "span:has-text('发简历')",
+        "button:has-text('发简历')",
         "span:has-text('发送简历')",
         "button:has-text('发送简历')",
         "[class*='resume']:has-text('简历')",
@@ -198,7 +213,9 @@ CLASSIFY_PROMPT = """你是招聘聊天意图分类助手。下面是招聘方(B
 请判断招聘方的意图，只能从以下三类里选一个：
 
 - rejected     ：明确拒绝/婉拒，例如"不合适""已招到""暂不考虑""不太匹配""谢谢您的关注但..."等
-- asked_resume ：希望求职者发简历，例如"方便发份简历吗""发个简历看看""把简历发我看下""投个简历"等
+- asked_resume ：希望求职者发简历/附件简历，例如"方便发份简历吗""发个简历看看""把简历发我看下"
+                 "投个简历""我想要一份您的附件简历""您是否同意（发送附件简历）""请发送附件简历"
+                 "求简历""发份附件简历"等——只要表达想要简历（含附件简历对话框）都算。
 - other        ：其他（普通寒暄、约时间面试、问问题、要联系方式等，既非拒绝也非索要简历）
 
 招聘方消息内容：
@@ -218,6 +235,12 @@ async def classify_reply(text: str) -> str:
     text = (text or "").strip()
     if not text:
         return "other"
+    # 关键词快通道：明确的"索要附件简历"措辞直接判 asked_resume，不依赖模型（防漏判）。
+    raw = text
+    if any(kw in raw for kw in ("附件简历", "想要一份您的简历", "想要您的简历",
+                                 "发一份简历", "发份简历", "发个简历", "发送简历",
+                                 "求简历", "看下简历", "看看简历", "投个简历", "投份简历")):
+        return "asked_resume"
     payload = {
         "messages": [{"role": "user", "content": [
             {"type": "text", "text": CLASSIFY_PROMPT.format(text=text[:1200])},
@@ -614,6 +637,8 @@ class ZhipinMessageScanner:
                 els = await self.page.query_selector_all(sel)
                 for el in els:
                     t = (await el.text_content() or "").strip()
+                    # 取整条 item-friend 全文（含对话框卡片文字），清理多余空白
+                    t = re.sub(r"\s+", " ", t).strip()
                     if t:
                         texts.append(t)
                 if texts:
@@ -660,36 +685,62 @@ class ZhipinMessageScanner:
         ver_name = "英文" if version == RESUME_EN else "中文"
         print(f"  📄 准备发送【{ver_name}】在线简历...", flush=True)
 
-        # 1) 点"发送简历"入口。两种情况：
-        #    情况1：聊天里出现【自带"发送简历"按钮的消息卡片】→ 优先点消息内的按钮
-        #    情况2：没有这种按钮消息，对方只是文字表达想要简历 → 点聊天窗口边上的工具栏按钮
+        # 触发底部简历选择弹窗的入口有三种（按你的描述）：
+        #   情况1a：对方用【对话框卡片+按钮】索要附件简历（文字"我想要一份您的附件简历，
+        #           您是否同意"+ 拒绝/同意 两个按钮）→ 点卡片里的"同意"。
+        #   情况1b：聊天里出现自带"发送简历"按钮的卡片 → 点该按钮。
+        #   情况2 ：对方只用文字索要、无按钮 → 点屏幕上方工具栏的"发简历/发送简历"按钮。
+        # 三种点完，屏幕底部都会弹出简历选择（中文/英文），默认选中文。
         ok = False
-        inmsg = None
-        for sel in SEL["resume_inmsg_btn"]:
+
+        # 情况1a：先找对话框卡片里的"同意"按钮（最贴合用户给的"得贤人力/张瑜"例子）
+        agree = None
+        for sel in SEL["resume_agree_btn"]:
             try:
                 el = await self.page.query_selector(sel)
                 if el and await el.is_visible():
-                    inmsg = el
+                    agree = el
                     break
             except Exception:
                 continue
-        if inmsg:
-            print("  → 情况1：点击聊天消息卡片里的'发送简历'按钮", flush=True)
+        if agree:
+            print("  → 情况1a：点击对话框卡片里的'同意'按钮（同意发送附件简历）", flush=True)
             try:
-                await inmsg.click()
+                await agree.click()
                 ok = True
             except Exception:
                 ok = False
+
+        # 情况1b：聊天卡片里自带的"发送简历"按钮
         if not ok:
-            print("  → 情况2：消息内无按钮，点击聊天窗口工具栏的'发送简历'按钮", flush=True)
+            inmsg = None
+            for sel in SEL["resume_inmsg_btn"]:
+                try:
+                    el = await self.page.query_selector(sel)
+                    if el and await el.is_visible():
+                        inmsg = el
+                        break
+                except Exception:
+                    continue
+            if inmsg:
+                print("  → 情况1b：点击聊天消息卡片里的'发送简历'按钮", flush=True)
+                try:
+                    await inmsg.click()
+                    ok = True
+                except Exception:
+                    ok = False
+
+        # 情况2：点屏幕上方工具栏的"发简历/发送简历"按钮
+        if not ok:
+            print("  → 情况2：点击聊天窗口工具栏的'发送简历'按钮", flush=True)
             ok = await self.click_smart(
                 SEL["send_resume_btn"],
-                "聊天消息里没有发送简历的按钮。请在聊天输入框上方/旁边的工具栏里，"
-                "找到并点击'发送简历'按钮（不是聊天消息气泡里的按钮）。",
+                "聊天消息里没有发送简历的按钮。请在聊天窗口上方工具栏里，"
+                "找到并点击'发简历'/'发送简历'按钮（不是聊天消息气泡里的按钮）。",
                 "send_resume_entry.png",
             )
         if not ok:
-            print("  [WARN] 两种方式都未找到'发送简历'入口（待调试确认选择器）", flush=True)
+            print("  [WARN] 三种方式都未找到'发送简历'入口（待调试确认选择器）", flush=True)
             return False
         za.human_delay(1.5, 2.5)
 
