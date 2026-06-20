@@ -788,11 +788,35 @@ class ZhipinMessageScanner:
             print("  [WARN] 未点到弹窗'发送'按钮——简历可能未真正发出（待确认选择器）", flush=True)
             await za.screenshot_page(self.page, f"resume_send_stuck_{version}.png")
             return False
-        za.human_delay(1.5, 2.5)
-        print(f"  ✅ 已点击简历预览'发送'，发出【{ver_name}】简历", flush=True)
+        za.human_delay(1.5, 2.8)
+
+        # 4) 校验简历【真的发出去了】：会话里会出现"您的附件简历…已发送给Boss"之类成功提示
+        #    （实测如 Atomic 那条："您的附件简历 刘先生的简历… 已发送给Boss 点击查看附件"）。
+        sent_ok = await self._confirm_resume_sent()
+        if not sent_ok:
+            print("  ⚠️ 未检测到'已发送给Boss'提示——简历可能未真正发出，标记失败待复查", flush=True)
+            await za.screenshot_page(self.page, f"resume_unconfirmed_{version}.png")
+            return False
+        print(f"  ✅ 已确认发出【{ver_name}】简历（会话出现'已发送给Boss'提示）", flush=True)
         # 发完简历补一句礼貌话
         await self._send_chat_text("简历已发，请您查收")
         return True
+
+    async def _confirm_resume_sent(self) -> bool:
+        """校验简历是否真的发出：会话区出现"已发送给Boss / 附件简历…已发送 / 简历已发送"等提示。
+        轮询 ~5 秒（发送到出现回执有延迟）。"""
+        import re as _re
+        for _ in range(10):
+            try:
+                body = await self.page.evaluate(
+                    "() => document.body ? document.body.innerText : ''")
+                if _re.search(r"已发送给\s*Boss|附件简历.*已发送|您的(附件)?简历.*已发送|简历已发送|"
+                              r"已成功发送|点击查看附件", body or ""):
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        return False
 
     async def _send_chat_text(self, text: str) -> bool:
         """在当前会话的聊天输入框里输入一句话并按 Enter 发送。"""
