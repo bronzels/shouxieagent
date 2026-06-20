@@ -261,20 +261,31 @@ CLASSIFY_PROMPT = """你是招聘聊天意图分类助手。下面是招聘方(B
 只输出一个词（rejected / asked_resume / other），不要任何解释。"""
 
 
-async def classify_reply(text: str) -> str:
+# Boss直聘【附件简历对话框】的系统固定措辞（卡片+同意/拒绝按钮，非真人自由文字）。
+# 只有这种【结构化卡片】才走关键词快通道；真人发的纯文字气泡一律交给 LLM 判断。
+_ATTACHMENT_RESUME_DIALOG_PHRASES = (
+    "我想要一份您的附件简历",      # 卡片正文
+    "想要一份您的附件简历",
+    "您是否同意",                  # 配合"同意/拒绝"按钮
+)
+
+
+async def classify_reply(text: str, is_dialog_card: bool = False) -> str:
     """
-    用纯文本免费模型判断招聘方回复意图，返回 'rejected' / 'asked_resume' / 'other'。
+    判断招聘方回复意图，返回 'rejected' / 'asked_resume' / 'other'。
+
+    ⚠️ 原则（用户要求）：纯文字气泡是【真人】发的，必须用 LLM 做意图识别，不能只靠关键词。
+    仅当 is_dialog_card=True 且命中【附件简历对话框】系统固定措辞时，才用关键词快通道
+    （那是系统化的结构卡片，措辞固定+带同意/拒绝按钮，确定性高）。其余一律走 LLM。
+
     复用 zhipin_apply._post_openrouter + VERIFY_MODELS_TEXT 免费模型 fallback 链。
-    解析失败/异常时保守返回 'other'（不误判为拒绝，也不误发简历）。
+    解析失败/异常时保守返回 'other'（不误判拒绝，也不误发简历）。
     """
     text = (text or "").strip()
     if not text:
         return "other"
-    # 关键词快通道：明确的"索要附件简历"措辞直接判 asked_resume，不依赖模型（防漏判）。
-    raw = text
-    if any(kw in raw for kw in ("附件简历", "想要一份您的简历", "想要您的简历",
-                                 "发一份简历", "发份简历", "发个简历", "发送简历",
-                                 "求简历", "看下简历", "看看简历", "投个简历", "投份简历")):
+    # 仅对【附件简历对话框】这种系统结构化卡片走关键词快通道（其余纯文字走 LLM）
+    if is_dialog_card and any(p in text for p in _ATTACHMENT_RESUME_DIALOG_PHRASES):
         return "asked_resume"
     payload = {
         "messages": [{"role": "user", "content": [
@@ -665,12 +676,13 @@ class ZhipinMessageScanner:
                 continue
         return False
 
-    async def _extract_other_last_messages(self) -> tuple[bool, str]:
+    async def _extract_other_last_messages(self) -> tuple[bool, str, bool]:
         """
         进入会话后，提取对方(BOSS)发的消息。
-        返回 (对方是否有回复, 对方最后消息文本拼接)。
-        - 若找不到任何对方气泡 → (False, "")，即"只有我发的招呼" → read_noreply。
-        TODO[调试确认]：msg_from_other 选择器（区分对方/我）待核对。
+        返回 (对方是否有回复, 对方最后消息文本拼接, 是否含附件简历对话框卡片)。
+        - 若找不到任何对方气泡 → (False, "", False)，即"只有我发的招呼" → read_noreply。
+        is_dialog_card：会话里是否存在【附件简历对话框】(带'同意'按钮的系统卡片)——
+        仅这种结构化卡片允许关键词快通道判 asked_resume；纯文字气泡走 LLM。
         """
         texts: list[str] = []
         for sel in SEL["msg_from_other"]:
@@ -686,11 +698,21 @@ class ZhipinMessageScanner:
                     break
             except Exception:
                 continue
+        # 检测是否存在【附件简历对话框】卡片（带"同意"按钮）——结构化系统卡片
+        is_dialog_card = False
+        for sel in SEL["resume_agree_btn"]:
+            try:
+                el = await self.page.query_selector(sel)
+                if el and await el.is_visible():
+                    is_dialog_card = True
+                    break
+            except Exception:
+                continue
         if not texts:
-            return False, ""
+            return False, "", is_dialog_card
         # 取最后若干条【真实】对方消息（最多 3 条）拼接，供意图分类
         tail = texts[-3:]
-        return True, " ".join(tail)
+        return True, " ".join(tail), is_dialog_card
 
     async def _read_chat_company_position(self, fallback_company: str,
                                            fallback_position: str) -> tuple[str, str]:
@@ -938,7 +960,7 @@ class ZhipinMessageScanner:
         # 进入会话后尽量用聊天窗标题校正公司/职位（更准确）
         company, position = await self._read_chat_company_position(company, position)
 
-        has_other, other_text = await self._extract_other_last_messages()
+        has_other, other_text, is_dialog_card = await self._extract_other_last_messages()
 
         # 情况2：只有我发的招呼、对方无回复 → read_noreply
         if not has_other:
@@ -950,9 +972,10 @@ class ZhipinMessageScanner:
             return {"company": company, "position": position,
                     "status": "read_noreply", "note": "对方无回复"}
 
-        # 对方有回复 → 用纯文本免费模型分类意图
-        intent = await classify_reply(other_text)
-        print(f"  🤖 对方最后消息='{other_text[:40]}' → 意图={intent}", flush=True)
+        # 对方有回复 → 分类意图。纯文字气泡走 LLM；仅附件简历对话框卡片走关键词快通道。
+        intent = await classify_reply(other_text, is_dialog_card=is_dialog_card)
+        card_tag = "[对话框卡片]" if is_dialog_card else "[纯文字气泡·LLM]"
+        print(f"  🤖 对方最后消息{card_tag}='{other_text[:40]}' → 意图={intent}", flush=True)
 
         # 情况3：拒绝
         if intent == "rejected":
