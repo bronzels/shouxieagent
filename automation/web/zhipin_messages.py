@@ -962,6 +962,14 @@ class ZhipinMessageScanner:
 
         has_other, other_text, is_dialog_card = await self._extract_other_last_messages()
 
+        # 【对话框风格索要简历】短路（用户指令）：会话里出现带"同意"按钮的附件简历对话框卡片，
+        # 检测到就直接当 asked_resume 处理、点按钮发简历，忽略卡片后面的系统干扰消息（PK卡等），
+        # 不再纠结"最后一条消息是什么"。
+        if is_dialog_card:
+            print("  🤖 检测到【附件简历对话框卡片】(有'同意'按钮) → 直接发简历（忽略后续系统消息）", flush=True)
+            return await self._handle_asked_resume(company, position,
+                                                   other_text or "附件简历对话框索要", "asked_resume")
+
         # 情况2：只有我发的招呼、对方无回复 → read_noreply
         if not has_other:
             zhipin_status.upsert_status(
@@ -972,10 +980,9 @@ class ZhipinMessageScanner:
             return {"company": company, "position": position,
                     "status": "read_noreply", "note": "对方无回复"}
 
-        # 对方有回复 → 分类意图。纯文字气泡走 LLM；仅附件简历对话框卡片走关键词快通道。
-        intent = await classify_reply(other_text, is_dialog_card=is_dialog_card)
-        card_tag = "[对话框卡片]" if is_dialog_card else "[纯文字气泡·LLM]"
-        print(f"  🤖 对方最后消息{card_tag}='{other_text[:40]}' → 意图={intent}", flush=True)
+        # 对方有回复 → 分类意图。纯文字气泡走 LLM（真人发的，必须 LLM 判断）。
+        intent = await classify_reply(other_text, is_dialog_card=False)
+        print(f"  🤖 对方最后消息[纯文字气泡·LLM]='{other_text[:40]}' → 意图={intent}", flush=True)
 
         # 情况3：拒绝
         if intent == "rejected":
@@ -989,52 +996,9 @@ class ZhipinMessageScanner:
                     "status": "rejected", "intent": intent,
                     "reply_text": other_text, "note": other_text[:60]}
 
-        # 情况4：索要简历 → 先标 asked_resume，再发简历，发后改 resume_sent
+        # 情况4：索要简历 → 发简历
         if intent == "asked_resume":
-            # 已发过简历就跳过，避免重复发（会话里已有"已发送给Boss/已发简历"回执）
-            if await self._confirm_resume_sent():
-                zhipin_status.upsert_status(
-                    self.status_data, company, position, "resume_sent",
-                    task_source=TASK_SOURCE, note="本会话已存在简历发送回执，跳过重复发",
-                    reply_text=other_text, intent=intent,
-                )
-                print("  → 状态: resume_sent（此前已发过简历，跳过重复发）", flush=True)
-                return {"company": company, "position": position,
-                        "status": "resume_sent", "intent": intent,
-                        "reply_text": other_text, "note": "已发过,跳过"}
-
-            zhipin_status.upsert_status(
-                self.status_data, company, position, "asked_resume",
-                task_source=TASK_SOURCE, note=f"对方索要简历: {other_text[:60]}",
-                reply_text=other_text, intent=intent,
-            )
-            print("  → 状态: asked_resume (对方索要简历)", flush=True)
-
-            # 判断发中文还是英文简历
-            want_en = wants_english_resume(other_text)
-            version = RESUME_EN if want_en else RESUME_CN
-            ver_name = "英文" if want_en else "中文"
-
-            # 调试模式：只记录 asked_resume，不实际发简历
-            if self.no_send_resume:
-                print(f"  ⏸️ [--no-send-resume] 跳过发简历，仅记录 asked_resume（应发{ver_name}简历）", flush=True)
-                return {"company": company, "position": position,
-                        "status": "asked_resume", "note": f"待发{ver_name}简历(调试未发)"}
-
-            sent = await self.send_resume(version)
-            if sent:
-                zhipin_status.upsert_status(
-                    self.status_data, company, position, "resume_sent",
-                    task_source=TASK_SOURCE, note=f"已发{ver_name}简历",
-                )
-                print(f"  → 状态: resume_sent (已发{ver_name}简历)", flush=True)
-                return {"company": company, "position": position,
-                        "status": "resume_sent", "note": f"已发{ver_name}简历"}
-            else:
-                # 发送失败：保留 asked_resume，待下次/人工重试
-                print("  [WARN] 发简历未成功，保留 asked_resume 状态待重试", flush=True)
-                return {"company": company, "position": position,
-                        "status": "asked_resume", "note": "发简历未成功，待重试"}
+            return await self._handle_asked_resume(company, position, other_text, intent)
 
         # 情况 other：对方回复了但既非拒绝也非索要简历（约面试/寒暄/问问题等）
         # 记为 unread（不进入拦截集合，留待人工处理或后续重投），并在 note 说明。
@@ -1047,6 +1011,51 @@ class ZhipinMessageScanner:
         return {"company": company, "position": position,
                 "status": "unread", "intent": "other",
                 "reply_text": other_text, "note": f"other(留待人工): {other_text[:60]}"}
+
+    async def _handle_asked_resume(self, company: str, position: str,
+                                   other_text: str, intent: str) -> dict:
+        """处理"索要简历"：已发过则跳过；否则按中/英文发简历并校验。供对话框短路+普通路径复用。"""
+        # 已发过简历就跳过，避免重复发（会话里已有"已发送给Boss/已发简历"回执）
+        if await self._confirm_resume_sent():
+            zhipin_status.upsert_status(
+                self.status_data, company, position, "resume_sent",
+                task_source=TASK_SOURCE, note="本会话已存在简历发送回执，跳过重复发",
+                reply_text=other_text, intent=intent,
+            )
+            print("  → 状态: resume_sent（此前已发过简历，跳过重复发）", flush=True)
+            return {"company": company, "position": position,
+                    "status": "resume_sent", "intent": intent,
+                    "reply_text": other_text, "note": "已发过,跳过"}
+
+        zhipin_status.upsert_status(
+            self.status_data, company, position, "asked_resume",
+            task_source=TASK_SOURCE, note=f"对方索要简历: {other_text[:60]}",
+            reply_text=other_text, intent=intent,
+        )
+        print("  → 状态: asked_resume (对方索要简历)", flush=True)
+
+        # 判断发中文还是英文简历（默认中文；对方明确要英文才发英文）
+        want_en = wants_english_resume(other_text)
+        version = RESUME_EN if want_en else RESUME_CN
+        ver_name = "英文" if want_en else "中文"
+
+        if self.no_send_resume:
+            print(f"  ⏸️ [--no-send-resume] 跳过发简历，仅记录 asked_resume（应发{ver_name}简历）", flush=True)
+            return {"company": company, "position": position,
+                    "status": "asked_resume", "note": f"待发{ver_name}简历(调试未发)"}
+
+        sent = await self.send_resume(version)
+        if sent:
+            zhipin_status.upsert_status(
+                self.status_data, company, position, "resume_sent",
+                task_source=TASK_SOURCE, note=f"已发{ver_name}简历",
+            )
+            print(f"  → 状态: resume_sent (已发{ver_name}简历)", flush=True)
+            return {"company": company, "position": position,
+                    "status": "resume_sent", "note": f"已发{ver_name}简历"}
+        print("  [WARN] 发简历未成功，保留 asked_resume 状态待重试", flush=True)
+        return {"company": company, "position": position,
+                "status": "asked_resume", "note": "发简历未成功，待重试"}
 
     async def search_and_scan(self, keywords: list, processed_keys: set, stat: dict):
         """搜索补扫：Boss直聘会话列表只显示约40条活跃会话，更早的会话(如得贤人力)不在列表里、
@@ -1067,41 +1076,49 @@ class ZhipinMessageScanner:
             print("  [WARN] 未找到搜索框，跳过搜索补扫", flush=True)
             return
         print(f"\n🔎 搜索补扫（列表外会话），关键词: {keywords}", flush=True)
+        # ⚠️ 搜索结果在【独立容器】.search-ul > .search-list（不是底层 .user-list 那40条全部会话）。
+        # 每点开一个会话，搜索结果会清空/重渲染，故每次都重新输入关键词再按 index 取结果（避免 stale）。
+        RESULT_SEL = ".search-ul .search-list, .search-list, [class*='search'] li"
         for kw in keywords:
             try:
-                await sb.click()
-                await sb.fill("")
-                za.human_delay(0.3, 0.6)
-                await sb.type(kw, delay=60)
-                za.human_delay(1.5, 2.5)
-                results = await self._get_conversation_handles()
-                n = len(results)
-                print(f"  🔎 '{kw}' → {n} 条结果", flush=True)
-                # 逐个处理（每点一个会刷新，故按需重新搜索定位）。这里限制每词最多处理前8条。
-                for ri in range(min(n, 8)):
-                    results = await self._get_conversation_handles()
-                    if ri >= len(results):
+                await sb.click(); await sb.fill(""); za.human_delay(0.3, 0.6)
+                await sb.type(kw, delay=60); za.human_delay(1.8, 2.6)
+                first = await self.page.query_selector_all(RESULT_SEL)
+                n = len(first)
+                print(f"  🔎 '{kw}' → {n} 条搜索结果", flush=True)
+                for ri in range(min(n, 12)):
+                    # 每次重新搜索定位（点开会话后搜索结果会消失，需重输关键词）
+                    if ri > 0:
+                        await sb.click(); await sb.fill(""); za.human_delay(0.3, 0.6)
+                        await sb.type(kw, delay=60); za.human_delay(1.5, 2.3)
+                    res = await self.page.query_selector_all(RESULT_SEL)
+                    if ri >= len(res):
                         break
-                    item = results[ri]
-                    company = await self._first_text(item, SEL["conv_company"])
-                    position = await self._first_text(item, SEL["conv_position"])
-                    preview = await self._first_text(item, SEL["conv_preview"])
-                    if not position and preview:
-                        position = extract_position_from_greeting(preview)
-                    key = f"{(company or '').strip()}|{(position or '').strip()}"
-                    if not company and not position:
+                    item = res[ri]
+                    label = re.sub(r"\s+", " ", (await item.text_content() or "")).strip()
+                    # 搜索结果项文本形如"张瑜得贤人力猎头顾问 职位: 高级大模型算法工程师"
+                    company = ""
+                    position = ""
+                    mpos = re.search(r"职位[:：]\s*(.+)$", label)
+                    if mpos:
+                        position = mpos.group(1).strip()
+                    # 公司：取"职位:"之前、去掉姓名/角色后的主体（不精确，进会话后会用头部校正）
+                    head = label.split("职位")[0]
+                    company = head.strip()
+                    key = f"{company}|{position}"
+                    if not label:
                         continue
                     if key in processed_keys:
                         continue
                     processed_keys.add(key)
-                    print(f"\n  [搜索·{kw}] 会话: {company or '?'} | {position or '?'}", flush=True)
+                    print(f"\n  [搜索·{kw}] 结果: {label[:50]}", flush=True)
                     try:
                         await item.scroll_into_view_if_needed()
                         za.human_delay(0.4, 0.8)
                         await item.click()
                         za.human_delay(1.5, 2.8)
                     except Exception as e:
-                        print(f"  [WARN] 打开搜索会话失败: {e}", flush=True)
+                        print(f"  [WARN] 打开搜索会话失败: {str(e)[:40]}", flush=True)
                         continue
                     row = await self._process_opened_conversation(company, position)
                     if row:
@@ -1113,7 +1130,6 @@ class ZhipinMessageScanner:
             except Exception as e:
                 print(f"  [WARN] 搜索 '{kw}' 异常: {str(e)[:50]}", flush=True)
                 continue
-        # 清空搜索框恢复列表
         try:
             await sb.click(); await sb.fill("")
         except Exception:
