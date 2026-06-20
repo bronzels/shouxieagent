@@ -662,6 +662,64 @@ def _is_salary_obfuscated(salary_text: str) -> bool:
 # 拦截列表 API joblist.json 取明文 salaryDesc（见 zhipin_llm_sz / zhipin_position_tabs）。
 
 
+# ─── 标题预筛（反爬关键：明显不相关的岗位不点开详情，大幅减少"遍历式详情点击"）──────
+# 技术/开发信号：标题或标签含这些 → 一律放行去点详情做完整 LLM 判断（不漏）。
+_TECH_SIGNALS = [
+    "开发", "工程师", "程序", "算法", "后端", "前端", "全栈", "客户端", "移动端",
+    "架构", "研发", "测试", "数据", "运维", "平台", "系统", "嵌入式", "底层",
+    "ai", "llm", "大模型", "机器学习", "深度学习", "模型", "agent", "rag", "nlp", "cv",
+    "python", "java", "golang", "go ", "c++", "rust", "node", "react", "vue",
+    "engineer", "developer", "programmer", "software", "backend", "frontend",
+    "fullstack", "sde", "sdet", "devops", "技术", "编程", "智能",
+]
+# 明确的非技术岗关键词：标题命中【且无任何技术信号】→ 明显不相关，不点详情直接跳过。
+_NONTECH_KEYWORDS = [
+    "销售", "市场", "商务", "bd", "渠道", "招商", "推广",
+    "运营", "新媒体", "社群", "内容", "用户增长", "增长",
+    "人力", "招聘", "hr", "猎头", "顾问",
+    "文案", "编辑", "翻译", "写作", "撰稿", "校对",
+    "客服", "售后", "话务", "接线",
+    "设计师", "美工", "原画", "插画", "ui设计", "平面", "视觉", "剪辑", "摄影", "美术",
+    "主播", "直播", "模特",
+    "教师", "老师", "讲师", "辅导", "家教", "教练", "培训师", "授课",
+    "数据标注", "标注", "审核员", "质检",
+    "财务", "会计", "出纳", "税务", "审计",
+    "行政", "前台", "助理", "秘书",
+    "医生", "护士", "医师", "药师", "律师", "法务",
+    "采购", "物流", "仓管", "司机", "保安", "保洁",
+    "金融分析", "投资", "理财", "风控", "保险", "证券经纪",
+]
+
+
+# 强非技术词：即使标题里也含"数据/技术"等信号，命中这些也直接判非技术（如"数据标注师"）。
+_STRONG_NONTECH = [
+    "数据标注", "标注师", "数据采集员", "数据录入", "审核员",
+    "销售", "客服", "运营", "文案", "猎头", "美工", "原画", "插画",
+    "主播", "直播", "模特", "家教", "保安", "保洁", "司机",
+]
+
+
+def title_is_obviously_irrelevant(title: str, tags=None) -> bool:
+    """标题预筛：明显与软件开发无关的岗位返回 True（不点详情，直接跳过）。
+
+    判断顺序（宁放过不误杀）：
+      1. 含【强非技术词】(数据标注/销售/运营/客服/文案/猎头/美工/主播…)→ True（即使有"数据"等信号也跳过）。
+      2. 含任何【技术信号】→ False（放行去点详情做完整 LLM 判断，不漏）。
+      3. 无技术信号 且 含【非技术岗关键词】→ True（明显不相关，跳过）。
+      4. 其余（拿不准）→ False（仍点详情）。
+    目的：把"逐个点开几百个详情"减少到只点可能相关的，降低反爬遍历特征。
+    """
+    text = (title or "") + " " + " ".join(tags or [])
+    low = text.lower()
+    if any(k in low for k in _STRONG_NONTECH):
+        return True
+    if any(s in low for s in _TECH_SIGNALS):
+        return False
+    if any(k in low for k in _NONTECH_KEYWORDS):
+        return True
+    return False
+
+
 async def verify_job_is_it_remote(job_title: str, job_desc: str, salary: str = "", image_path: str = None) -> tuple[bool, str]:
     """
     判断职位是否为「IT 软件/技术开发类」且「支持远程/WFH」。
@@ -1791,6 +1849,13 @@ class BossZhipinAutomator:
 
         print(f"\n  🔎 检查职位: {company} | {title}")
         print(f"     薪资: {job.get('salary', 'N/A')} | 地点: {job.get('location','')} | 标签: {', '.join(job.get('tags', []))}")
+
+        # 标题预筛（反爬关键）：明显非软件开发的岗位【不点开详情】，直接按标题判跳过，
+        # 大幅减少"逐个点开几百个详情"的遍历式点击特征。子类可设 use_title_prefilter=False 关闭。
+        if getattr(self, "use_title_prefilter", True):
+            if title_is_obviously_irrelevant(title, job.get("tags", [])):
+                print(f"  ⏭️  [标题预筛-明显不相关，不点详情] {company} | {title}")
+                return "reject"
 
         # 暂存当前职位地点，供需要 location 的 verify_fn（如职位tab混合判断）读取
         self._current_location = job.get("location", "")
