@@ -1000,8 +1000,9 @@ class BossZhipinAutomator:
         self.page: Page = None
         self.browser: Browser = None
         self.context = None
-        self.viewport_width = 1280
-        self.viewport_height = 800
+        # 窗口尺寸轻微随机化（反爬：固定 1280x800 是机器人指纹之一）。
+        self.viewport_width = random.choice([1280, 1366, 1440, 1536, 1512])
+        self.viewport_height = random.choice([720, 768, 800, 864, 900])
 
     async def start_browser(self, playwright):
         """
@@ -1029,9 +1030,14 @@ class BossZhipinAutomator:
         self.browser = self.context.browser  # persistent context 下可能为 None
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
 
-        # 注入反检测脚本
+        # 注入反检测脚本。⚠️ 用的是【真实 Chrome】(channel=chrome)+持久化 profile，
+        # 它的 plugins/chrome对象/WebGL 本就是真实值——【不要】伪造这些，否则制造指纹不一致
+        # 反而更易被识别。只补无害项：webdriver 置 undefined、languages 兜底为中文。
         await self.context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            if (!navigator.languages || navigator.languages.length === 0) {
+                Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh']});
+            }
         """)
 
     async def navigate_to_zhipin(self):
@@ -2024,6 +2030,97 @@ class BossZhipinAutomator:
             await self._close_greet_dialog()
             return "fail"
 
+    async def _read_visible_cards(self) -> list:
+        """读取当前 DOM 里【已渲染】的职位卡(不强制滚到底)，返回 job dict 列表(含 title/company/
+        salary/location/tags)。供"边滚边处理"按屏读取。"""
+        jobs = []
+        try:
+            cards = await self.page.query_selector_all(".job-card-box")
+            for card in cards:
+                try:
+                    job = {}
+                    t = await card.query_selector(".job-name")
+                    if t:
+                        job["title"] = (await t.text_content() or "").strip()
+                    co = await card.query_selector(".boss-name, .company-name")
+                    if co:
+                        job["company"] = (await co.text_content() or "").strip()
+                    sa = await card.query_selector(".job-salary")
+                    if sa:
+                        job["salary"] = (await sa.text_content() or "").strip()
+                    lo = await card.query_selector(".company-location")
+                    if lo:
+                        job["location"] = (await lo.text_content() or "").strip()
+                    job["tags"] = []
+                    for tag in await card.query_selector_all(".tag-list li"):
+                        tx = (await tag.text_content() or "").strip()
+                        if tx:
+                            job["tags"].append(tx)
+                    if job.get("title") and job.get("company"):
+                        jobs.append(job)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return jobs
+
+    async def _stream_process_cards(self, city: str, stat: dict):
+        """边滚边处理：抓当前可见职位卡→处理新出现的→下滚一屏→再抓再处理→直到到底。
+
+        - 用 seen 集合(公司|职位)去重，避免重复处理同一卡。
+        - 连续 stable_rounds 轮没有新卡出现判定到底，结束本城。
+        - 处理穿插随机停顿/偶尔回看(拟人，见 apply_to_job 内的随机化)。
+        """
+        await self._settle_after_navigation()
+        seen = set()
+        verified_count = 0
+        stable = 0
+        max_rounds = 60
+        for _ in range(max_rounds):
+            cards = await self._read_visible_cards()
+            new_jobs = []
+            for j in cards:
+                k = f"{j.get('company','').strip()}|{j.get('title','').strip()}"
+                if k and k not in seen:
+                    seen.add(k)
+                    new_jobs.append(j)
+            if new_jobs:
+                stable = 0
+                for job in new_jobs:
+                    enter_chat = bool(VERIFY_ALL_IN_MESSAGES or verified_count < 3)
+                    status = await self.apply_to_job(job, city, enter_chat=enter_chat)
+                    stat["checked"] += 1
+                    if status in stat:
+                        stat[status] += 1
+                    if status == "applied" and enter_chat:
+                        verified_count += 1
+                    self._mark_processed(job.get("company", ""), job.get("title", ""), city, status)
+                    skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
+                    print(f"     ▸ [{city}] 进度：已处理 {stat['checked']}(本城) | "
+                          f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}", flush=True)
+                    if self.stop_requested:
+                        print("  🛑 当日沟通次数已用完，停止本城市处理。", flush=True)
+                        return
+                    human_delay(DELAY_MIN, DELAY_MAX)
+            else:
+                stable += 1
+                if stable >= 3:
+                    break  # 连续3轮无新卡 → 到底
+            # 往下滚一屏(回到列表后),加载更多卡；幅度随机化(拟人)
+            try:
+                await self.page.mouse.wheel(0, random.randint(500, 900))
+            except Exception:
+                pass
+            human_delay(SCROLL_WAIT_MIN, SCROLL_WAIT_MAX)
+            # 偶尔回看一点(真人会上下看)
+            if random.random() < 0.15:
+                try:
+                    await self.page.mouse.wheel(0, -random.randint(150, 300))
+                    human_delay(0.4, 1.0)
+                except Exception:
+                    pass
+        print(f"  📜 [{city}] 边滚边处理完成，本城共处理 {len(seen)} 个职位", flush=True)
+
     async def process_city(self, city: str):
         """
         处理单个城市的全部远程职位：
@@ -2061,32 +2158,10 @@ class BossZhipinAutomator:
             any_page_ok = True
             await screenshot_page(self.page, f"results_{city}.png")
 
-            # get_job_listings 已内置滚动懒加载到底，返回本次搜索全部职位
-            jobs = await self.get_job_listings()
-            if not jobs:
-                print(f"  ⚠️ 滚动加载后仍无职位")
-            else:
-                print(f"  📋 共找到 {len(jobs)} 个职位（已滚动加载全部），逐个检查...")
-                verified_count = 0  # 本城已去消息页核验的成功投递数（前3个核验）
-                for job in jobs:
-                    # 投递成功后是否进聊天界面看一眼：--verify-all 开则每个都进，否则每城前3个
-                    enter_chat = bool(VERIFY_ALL_IN_MESSAGES or verified_count < 3)
-                    status = await self.apply_to_job(job, city, enter_chat=enter_chat)
-                    stat["checked"] += 1
-                    if status in stat:
-                        stat[status] += 1
-                    if status == "applied" and enter_chat:
-                        verified_count += 1
-                    # 断点续跑：记录此职位已处理（含判断完跳过的），落盘
-                    self._mark_processed(job.get("company", ""), job.get("title", ""), city, status)
-                    # 实时累计进度提示
-                    skipped = stat['reject'] + stat['dup'] + stat['contacted'] + stat['blocked']
-                    print(f"     ▸ [{city}] 进度：检查 {stat['checked']}/{len(jobs)} | "
-                          f"投递 {stat['applied']} | 跳过 {skipped} | 失败 {stat['fail']}")
-                    if self.stop_requested:
-                        print("  🛑 当日沟通次数已用完，停止本城市处理。", flush=True)
-                        return stat
-                    human_delay(DELAY_MIN, DELAY_MAX)
+            # 【边滚边处理】(反爬关键)：不再"先滚到底拉出全部300个再遍历"，而是像真人——
+            # 抓当前可见的职位卡 → 处理这批新出现的 → 往下滚一屏 → 再抓再处理 → 直到滚不动(到底)。
+            # 这样行为更自然(看一点投一点)，也不会短时间把整页结果拉完。
+            await self._stream_process_cards(city, stat)
 
         # 步骤3：标记城市完成（城市级去重）
         if any_page_ok:
