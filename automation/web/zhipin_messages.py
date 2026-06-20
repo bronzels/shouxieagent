@@ -227,6 +227,21 @@ SEL = {
 }
 
 
+# 系统推送/非HR真实回复的噪音卡片（不计入对方回复，避免污染意图分类）。
+# 例："你与该职位竞争者PK情况…建议你查看详细分析"、安全提示、查看附件回执等。
+_SYSTEM_NOISE_PATTERNS = [
+    "竞争者pk", "竞争者 pk", "pk情况", "查看详细分析", "你超过竞争者",
+    "共人投递", "求职安全", "谨防", "防骗", "系统提示",
+    "已读未回提醒", "对方很忙", "牛人你好，我是",
+]
+
+
+def _is_system_noise(text: str) -> bool:
+    """判断一条消息是否为系统推送/非HR真实回复（应过滤，不参与意图判断）。"""
+    t = (text or "").lower()
+    return any(p in t for p in _SYSTEM_NOISE_PATTERNS)
+
+
 # ─── 回复意图分类（纯文本免费模型，复用 _post_openrouter）─────────────────────────
 
 CLASSIFY_PROMPT = """你是招聘聊天意图分类助手。下面是招聘方(BOSS)在Boss直聘上回复求职者的最后一条/最近几条消息。
@@ -324,7 +339,8 @@ class ZhipinMessageScanner:
     复用 zhipin_apply 的浏览器启动做法（持久化 chrome_profile，复用已登录态）。
     """
 
-    def __init__(self, export_csv: bool = False, no_send_resume: bool = False):
+    def __init__(self, export_csv: bool = False, no_send_resume: bool = False,
+                 search_keywords: list = None):
         self.status_data = zhipin_status.load_status()
         self.page: Page = None
         self.context = None
@@ -333,6 +349,11 @@ class ZhipinMessageScanner:
         self.export_csv = export_csv
         # 调试用：只扫描分类记录状态，不实际发简历（索要简历的仅标 asked_resume）
         self.no_send_resume = no_send_resume
+        # 搜索补扫关键词：列表只显示约40条活跃会话，更早的(如得贤人力)只能搜到。
+        # 默认搜常见招呼词/猎头词，把列表外有回复的会话也覆盖到。
+        self.search_keywords = search_keywords if search_keywords is not None else [
+            "猎头", "人力", "科技", "工程师", "简历", "顾问",
+        ]
         # 本次扫描每条会话的结果（用于可选 CSV 导出）
         self.scan_rows: list[dict] = []
 
@@ -659,7 +680,7 @@ class ZhipinMessageScanner:
                     t = (await el.text_content() or "").strip()
                     # 取整条 item-friend 全文（含对话框卡片文字），清理多余空白
                     t = re.sub(r"\s+", " ", t).strip()
-                    if t:
+                    if t and not _is_system_noise(t):  # 过滤系统推送卡片(PK等)
                         texts.append(t)
                 if texts:
                     break
@@ -667,7 +688,7 @@ class ZhipinMessageScanner:
                 continue
         if not texts:
             return False, ""
-        # 取最后若干条对方消息（最多 3 条）拼接，供意图分类
+        # 取最后若干条【真实】对方消息（最多 3 条）拼接，供意图分类
         tail = texts[-3:]
         return True, " ".join(tail)
 
@@ -910,6 +931,10 @@ class ZhipinMessageScanner:
             return {"company": company, "position": position, "status": "skip",
                     "note": f"打开会话失败:{e}"}
 
+        return await self._process_opened_conversation(company, position)
+
+    async def _process_opened_conversation(self, company: str, position: str) -> dict:
+        """处理【已点开】的会话（供列表遍历 + 搜索补扫复用）：读对方消息→分类→按需发简历。"""
         # 进入会话后尽量用聊天窗标题校正公司/职位（更准确）
         company, position = await self._read_chat_company_position(company, position)
 
@@ -943,6 +968,18 @@ class ZhipinMessageScanner:
 
         # 情况4：索要简历 → 先标 asked_resume，再发简历，发后改 resume_sent
         if intent == "asked_resume":
+            # 已发过简历就跳过，避免重复发（会话里已有"已发送给Boss/已发简历"回执）
+            if await self._confirm_resume_sent():
+                zhipin_status.upsert_status(
+                    self.status_data, company, position, "resume_sent",
+                    task_source=TASK_SOURCE, note="本会话已存在简历发送回执，跳过重复发",
+                    reply_text=other_text, intent=intent,
+                )
+                print("  → 状态: resume_sent（此前已发过简历，跳过重复发）", flush=True)
+                return {"company": company, "position": position,
+                        "status": "resume_sent", "intent": intent,
+                        "reply_text": other_text, "note": "已发过,跳过"}
+
             zhipin_status.upsert_status(
                 self.status_data, company, position, "asked_resume",
                 task_source=TASK_SOURCE, note=f"对方索要简历: {other_text[:60]}",
@@ -987,6 +1024,77 @@ class ZhipinMessageScanner:
         return {"company": company, "position": position,
                 "status": "unread", "intent": "other",
                 "reply_text": other_text, "note": f"other(留待人工): {other_text[:60]}"}
+
+    async def search_and_scan(self, keywords: list, processed_keys: set, stat: dict):
+        """搜索补扫：Boss直聘会话列表只显示约40条活跃会话，更早的会话(如得贤人力)不在列表里、
+        只能通过顶部搜索框搜到。本方法遍历关键词搜索，对搜出的、列表没处理过的会话补处理。
+
+        processed_keys: 已处理会话的 (公司|职位) key 集合，避免重复处理。
+        """
+        sb = None
+        for sel in ["input[placeholder*='搜索']", "input[placeholder*='联系人']", ".search-input input"]:
+            try:
+                el = await self.page.query_selector(sel)
+                if el and await el.is_visible():
+                    sb = el
+                    break
+            except Exception:
+                continue
+        if not sb:
+            print("  [WARN] 未找到搜索框，跳过搜索补扫", flush=True)
+            return
+        print(f"\n🔎 搜索补扫（列表外会话），关键词: {keywords}", flush=True)
+        for kw in keywords:
+            try:
+                await sb.click()
+                await sb.fill("")
+                za.human_delay(0.3, 0.6)
+                await sb.type(kw, delay=60)
+                za.human_delay(1.5, 2.5)
+                results = await self._get_conversation_handles()
+                n = len(results)
+                print(f"  🔎 '{kw}' → {n} 条结果", flush=True)
+                # 逐个处理（每点一个会刷新，故按需重新搜索定位）。这里限制每词最多处理前8条。
+                for ri in range(min(n, 8)):
+                    results = await self._get_conversation_handles()
+                    if ri >= len(results):
+                        break
+                    item = results[ri]
+                    company = await self._first_text(item, SEL["conv_company"])
+                    position = await self._first_text(item, SEL["conv_position"])
+                    preview = await self._first_text(item, SEL["conv_preview"])
+                    if not position and preview:
+                        position = extract_position_from_greeting(preview)
+                    key = f"{(company or '').strip()}|{(position or '').strip()}"
+                    if not company and not position:
+                        continue
+                    if key in processed_keys:
+                        continue
+                    processed_keys.add(key)
+                    print(f"\n  [搜索·{kw}] 会话: {company or '?'} | {position or '?'}", flush=True)
+                    try:
+                        await item.scroll_into_view_if_needed()
+                        za.human_delay(0.4, 0.8)
+                        await item.click()
+                        za.human_delay(1.5, 2.8)
+                    except Exception as e:
+                        print(f"  [WARN] 打开搜索会话失败: {e}", flush=True)
+                        continue
+                    row = await self._process_opened_conversation(company, position)
+                    if row:
+                        self.scan_rows.append(row)
+                        st = row.get("status", "skip")
+                        if st in stat:
+                            stat[st] += 1
+                    za.human_delay(0.8, 1.6)
+            except Exception as e:
+                print(f"  [WARN] 搜索 '{kw}' 异常: {str(e)[:50]}", flush=True)
+                continue
+        # 清空搜索框恢复列表
+        try:
+            await sb.click(); await sb.fill("")
+        except Exception:
+            pass
 
     # ── CSV 导出（可选）─────────────────────────────────────────────────────────
     def export_scan_csv(self) -> str:
@@ -1050,6 +1158,7 @@ class ZhipinMessageScanner:
                 total = min(total, MAX_CONVERSATIONS)
                 print(f"\n📋 将遍历 {total} 条会话（上限 {MAX_CONVERSATIONS}）", flush=True)
 
+                processed_keys = set()  # 已处理会话 key，供搜索补扫去重
                 for idx in range(total):
                     row = await self.process_conversation(idx)
                     if row:
@@ -1057,7 +1166,14 @@ class ZhipinMessageScanner:
                         st = row.get("status", "skip")
                         if st in stat:
                             stat[st] += 1
+                        k = f"{(row.get('company') or '').strip()}|{(row.get('position') or '').strip()}"
+                        processed_keys.add(k)
                     za.human_delay(0.8, 1.6)
+
+                # 搜索补扫：列表只显示约40条活跃会话，更早的(如得贤人力)只能搜到。
+                # 用关键词把列表外、有回复的会话也覆盖到（尤其索要简历的不能漏）。
+                if self.search_keywords:
+                    await self.search_and_scan(self.search_keywords, processed_keys, stat)
 
                 # 汇总
                 print("\n" + "=" * 60)
@@ -1119,6 +1235,12 @@ def _build_arg_parser():
         "--no-send-resume", action="store_true",
         help="调试用：只扫描分类并记录状态，索要简历的仅标记 asked_resume，不实际发送简历。",
     )
+    parser.add_argument(
+        "--search-keywords", default=None,
+        help="搜索补扫关键词(逗号分隔)：列表只显示约40条活跃会话，更早的(如得贤人力)只能搜到，"
+             "用这些词搜出列表外有回复的会话补处理。不传用默认(猎头/人力/科技/工程师/简历/顾问)。"
+             "传空串 '' 则关闭搜索补扫。",
+    )
     # UI-TARS 提供方式（与 zhipin_apply 一致，影响视觉兜底定位按钮的调用路径）
     parser.add_argument(
         "--uitars-provider", choices=["openrouter", "remote", "local"], default="openrouter",
@@ -1178,8 +1300,14 @@ def main():
 
     if args.no_send_resume:
         print("⏸️ --no-send-resume：本次只扫描记录状态，不实际发简历", flush=True)
+    # 搜索补扫关键词：None=用默认；传了则按逗号分隔；传空串=关闭
+    if args.search_keywords is None:
+        kw = None
+    else:
+        kw = [k.strip() for k in args.search_keywords.split(",") if k.strip()]
     asyncio.run(ZhipinMessageScanner(
-        export_csv=args.export_csv, no_send_resume=args.no_send_resume).run())
+        export_csv=args.export_csv, no_send_resume=args.no_send_resume,
+        search_keywords=kw).run())
 
 
 if __name__ == "__main__":
