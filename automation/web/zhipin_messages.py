@@ -78,6 +78,10 @@ TASK_SOURCE = "zhipin_messages"
 RESUME_CN = "cn"   # 中文在线简历（"刘先生"开头中文版，默认）
 RESUME_EN = "en"   # 英文在线简历
 
+# 可接受的工作城市（HR 确认工作地点时，地点∈此列表→接受；否则不处理留人工）。
+# 命令行 --accept-cities 覆盖（逗号分隔），默认仅深圳。
+ACCEPT_CITIES = ["深圳"]
+
 # 单次扫描最多处理的会话数（防止一次跑太久，可按需调大）
 MAX_CONVERSATIONS = 200
 
@@ -155,6 +159,15 @@ SEL = {
         "[class*='card'] button:has-text('同意')",
         ".item-friend a:has-text('同意')",
         "button:has-text('同意')",
+    ],
+    # 对话框式【确认工作地点】卡片里的"接受/同意/可以"按钮（接受城市时点它）。
+    "location_accept_btn": [
+        ".item-friend button:has-text('接受')",
+        ".item-friend button:has-text('同意')",
+        ".item-friend button:has-text('可以')",
+        "[class*='message'] button:has-text('接受')",
+        "[class*='card'] button:has-text('接受')",
+        "button:has-text('接受')",
     ],
     # 聊天消息气泡：我发的消息
     "msg_from_me": [
@@ -245,20 +258,22 @@ def _is_system_noise(text: str) -> bool:
 # ─── 回复意图分类（纯文本免费模型，复用 _post_openrouter）─────────────────────────
 
 CLASSIFY_PROMPT = """你是招聘聊天意图分类助手。下面是招聘方(BOSS)在Boss直聘上回复求职者的最后一条/最近几条消息。
-请判断招聘方的意图，只能从以下三类里选一个：
+请判断招聘方的意图，只能从以下四类里选一个：
 
-- rejected     ：明确拒绝/婉拒，例如"不合适""已招到""暂不考虑""不太匹配""谢谢您的关注但..."等
-- asked_resume ：希望求职者发简历/附件简历，例如"方便发份简历吗""发个简历看看""把简历发我看下"
-                 "投个简历""我想要一份您的附件简历""您是否同意（发送附件简历）""请发送附件简历"
-                 "求简历""发份附件简历"等——只要表达想要简历（含附件简历对话框）都算。
-- other        ：其他（普通寒暄、约时间面试、问问题、要联系方式等，既非拒绝也非索要简历）
+- rejected        ：明确拒绝/婉拒，例如"不合适""已招到""暂不考虑""不太匹配""谢谢您的关注但..."等
+- asked_resume    ：希望求职者发简历/附件简历，例如"方便发份简历吗""发个简历看看""把简历发我看下"
+                    "投个简历""我想要一份您的附件简历""您是否同意（发送附件简历）"等——只要表达想要简历都算。
+- location_confirm：在确认/询问【工作地点】，想知道求职者能否接受在某城市工作/到岗，例如
+                    "工作地点在西安，是否方便""需要到深圳办公可以吗""能接受base北京吗"
+                    "工作地点要求在XX，是否有在XX发展的意愿""坐标上海，能过来吗"等。
+- other           ：其他（普通寒暄、约时间面试、问其他问题、要联系方式等，不属于上面三类）
 
 招聘方消息内容：
 \"\"\"
 {text}
 \"\"\"
 
-只输出一个词（rejected / asked_resume / other），不要任何解释。"""
+只输出一个词（rejected / asked_resume / location_confirm / other），不要任何解释。"""
 
 
 # Boss直聘【附件简历对话框】的系统固定措辞（卡片+同意/拒绝按钮，非真人自由文字）。
@@ -299,9 +314,11 @@ async def classify_reply(text: str, is_dialog_card: bool = False) -> str:
     except Exception as e:
         print(f"  [WARN] 回复意图分类失败，按 other 处理: {e}", flush=True)
         return "other"
-    # 稳健解析：命中关键词即归类，优先级 asked_resume > rejected > other
+    # 稳健解析：命中关键词即归类，优先级 asked_resume > location_confirm > rejected > other
     if "asked_resume" in ans or "简历" in ans:
         return "asked_resume"
+    if "location_confirm" in ans or "location" in ans or "地点" in ans or "地址" in ans:
+        return "location_confirm"
     if "rejected" in ans or "拒绝" in ans:
         return "rejected"
     return "other"
@@ -320,6 +337,31 @@ def wants_english_resume(text: str) -> bool:
         if kw.lower() in t or kw in raw:
             return True
     return False
+
+
+def extract_confirm_city(text: str, accept_cities: list) -> tuple[bool, str]:
+    """从地点确认消息里判断 HR 要求的工作城市是否在【接受城市】列表内。
+
+    返回 (是否接受, 命中的城市名)。
+    - 文本里出现某个接受城市 → (True, 该城市)。
+    - 文本里出现了城市但都不在接受列表 → (False, 第一个识别到的非接受城市)。
+    - 没识别到具体城市 → (False, "")，交由调用方留待人工。
+    常见城市表用于"识别到城市但不接受"的判断。
+    """
+    t = text or ""
+    # 先看接受城市是否命中
+    for c in accept_cities:
+        c = c.strip()
+        if c and c in t:
+            return True, c
+    # 没命中接受城市：尝试识别文本里提到的其它城市（用于判定"明确是别的城市→不接受"）
+    common = ["北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "南京", "西安",
+              "苏州", "天津", "重庆", "厦门", "长沙", "郑州", "青岛", "宁波", "东莞",
+              "佛山", "合肥", "济南", "福州", "无锡", "大连", "珠海", "中山", "惠州"]
+    for c in common:
+        if c in t:
+            return False, c
+    return False, ""
 
 
 def extract_position_from_greeting(preview: str) -> str:
@@ -351,8 +393,10 @@ class ZhipinMessageScanner:
     """
 
     def __init__(self, export_csv: bool = False, no_send_resume: bool = False,
-                 search_keywords: list = None):
+                 search_keywords: list = None, accept_cities: list = None):
         self.status_data = zhipin_status.load_status()
+        # 可接受工作城市（HR 确认地点时用）；命令行 --accept-cities 覆盖，默认深圳
+        self.accept_cities = accept_cities if accept_cities else list(ACCEPT_CITIES)
         self.page: Page = None
         self.context = None
         self.viewport_width = 1280
@@ -1000,6 +1044,10 @@ class ZhipinMessageScanner:
         if intent == "asked_resume":
             return await self._handle_asked_resume(company, position, other_text, intent)
 
+        # 情况5：确认工作地点 → 接受城市则点接受/回复接受；否则不处理留人工
+        if intent == "location_confirm":
+            return await self._handle_location_confirm(company, position, other_text)
+
         # 情况 other：对方回复了但既非拒绝也非索要简历（约面试/寒暄/问问题等）
         # 记为 unread（不进入拦截集合，留待人工处理或后续重投），并在 note 说明。
         zhipin_status.upsert_status(
@@ -1056,6 +1104,66 @@ class ZhipinMessageScanner:
         print("  [WARN] 发简历未成功，保留 asked_resume 状态待重试", flush=True)
         return {"company": company, "position": position,
                 "status": "asked_resume", "note": "发简历未成功，待重试"}
+
+    async def _handle_location_confirm(self, company: str, position: str,
+                                       other_text: str) -> dict:
+        """处理 HR【确认工作地点】：地点∈接受城市→接受(对话框点接受按钮/气泡回复接受地点)；
+        否则不处理留人工。接受城市从 self.accept_cities（命令行 --accept-cities）取。"""
+        # 职位标题里也常带地点（如"…｜远程"旁显示"西安"），合并到文本一起判断城市
+        loc_text = other_text + " " + (position or "")
+        accepted, city = extract_confirm_city(loc_text, self.accept_cities)
+
+        if not accepted:
+            # 不是接受城市（或没识别到城市）→ 不处理，留待人工
+            note = (f"HR确认工作地点[{city or '未知'}]不在接受城市{self.accept_cities}，留待人工"
+                    if city else f"HR确认工作地点但未识别到城市，留待人工: {other_text[:40]}")
+            zhipin_status.upsert_status(
+                self.status_data, company, position, "unread",
+                task_source=TASK_SOURCE, note=note,
+                reply_text=other_text, intent="location_confirm",
+            )
+            print(f"  → 状态: unread (地点确认/非接受城市[{city or '未知'}]，留待人工)", flush=True)
+            return {"company": company, "position": position, "status": "unread",
+                    "intent": "location_confirm", "reply_text": other_text, "note": note}
+
+        # 接受城市：优先点【对话框接受按钮】，没有则【气泡回复】接受地点
+        if self.no_send_resume:
+            print(f"  ⏸️ [--no-send-resume] 跳过地点接受动作（应接受城市{city}）", flush=True)
+            return {"company": company, "position": position, "status": "unread",
+                    "intent": "location_confirm", "note": f"待接受地点{city}(调试未发)"}
+
+        acted = False
+        # 对话框风格：点"接受"按钮
+        for sel in SEL["location_accept_btn"]:
+            try:
+                el = await self.page.query_selector(sel)
+                if el and await el.is_visible():
+                    await el.click()
+                    acted = True
+                    print(f"  ✅ 对话框-点击'接受'按钮（接受工作地点{city}）", flush=True)
+                    break
+            except Exception:
+                continue
+        # 气泡风格：无按钮 → 打字回复接受地点
+        if not acted:
+            reply = f"可以的，我能接受在{city}工作，谢谢！"
+            acted = await self._send_chat_text(reply)
+            if acted:
+                print(f"  ✅ 气泡-已回复接受地点：{reply}", flush=True)
+
+        if acted:
+            zhipin_status.upsert_status(
+                self.status_data, company, position, "location_accepted",
+                task_source=TASK_SOURCE, note=f"已接受工作地点{city}",
+                reply_text=other_text, intent="location_confirm",
+            )
+            print(f"  → 状态: location_accepted (已接受{city})", flush=True)
+            return {"company": company, "position": position, "status": "location_accepted",
+                    "intent": "location_confirm", "reply_text": other_text,
+                    "note": f"已接受地点{city}"}
+        print("  [WARN] 未能执行地点接受动作（按钮/输入框未定位），留待人工", flush=True)
+        return {"company": company, "position": position, "status": "unread",
+                "intent": "location_confirm", "note": "地点接受动作失败,待人工"}
 
     async def search_and_scan(self, keywords: list, processed_keys: set, stat: dict):
         """搜索补扫：Boss直聘会话列表只显示约40条活跃会话，更早的会话(如得贤人力)不在列表里、
@@ -1190,7 +1298,8 @@ class ZhipinMessageScanner:
 
                 # 统计每种状态的数量
                 stat = {"unread": 0, "read_noreply": 0, "rejected": 0,
-                        "asked_resume": 0, "resume_sent": 0, "skip": 0}
+                        "asked_resume": 0, "resume_sent": 0,
+                        "location_accepted": 0, "skip": 0}
 
                 # 遍历会话。每处理一条后会话列表可能因切换而刷新，故每次重新取 handle。
                 total = len(await self._get_conversation_handles())
@@ -1223,6 +1332,7 @@ class ZhipinMessageScanner:
                 print(f"  拒绝 rejected      : {stat['rejected']}")
                 print(f"  索要简历 asked_resume: {stat['asked_resume']}")
                 print(f"  已发简历 resume_sent : {stat['resume_sent']}")
+                print(f"  已接受地点 location_accepted: {stat['location_accepted']}")
                 print(f"  跳过 skip          : {stat['skip']}")
                 print(f"  📁 状态已写入: {zhipin_status.MESSAGE_STATUS_FILE}", flush=True)
 
@@ -1279,6 +1389,11 @@ def _build_arg_parser():
         help="搜索补扫关键词(逗号分隔)：列表只显示约40条活跃会话，更早的(如得贤人力)只能搜到，"
              "用这些词搜出列表外有回复的会话补处理。不传用默认(猎头/人力/科技/工程师/简历/顾问)。"
              "传空串 '' 则关闭搜索补扫。",
+    )
+    parser.add_argument(
+        "--accept-cities", default=None,
+        help="可接受的工作城市(逗号分隔)：HR确认工作地点时，地点∈此列表→接受(对话框点接受按钮/"
+             "气泡回复接受)，否则不处理留人工。不传默认仅'深圳'。例：--accept-cities 深圳,广州,远程",
     )
     # UI-TARS 提供方式（与 zhipin_apply 一致，影响视觉兜底定位按钮的调用路径）
     parser.add_argument(
@@ -1344,9 +1459,14 @@ def main():
         kw = None
     else:
         kw = [k.strip() for k in args.search_keywords.split(",") if k.strip()]
+    # 接受城市：None=默认深圳；传了则按逗号分隔
+    cities = None
+    if args.accept_cities:
+        cities = [c.strip() for c in args.accept_cities.split(",") if c.strip()]
+    print(f"📍 可接受工作城市: {cities or ACCEPT_CITIES}", flush=True)
     asyncio.run(ZhipinMessageScanner(
         export_csv=args.export_csv, no_send_resume=args.no_send_resume,
-        search_keywords=kw).run())
+        search_keywords=kw, accept_cities=cities).run())
 
 
 if __name__ == "__main__":
