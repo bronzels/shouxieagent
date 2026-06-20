@@ -720,6 +720,72 @@ class ZhipinMessageScanner:
                 continue
         return False
 
+    async def _detect_dialog_card(self) -> dict:
+        """检测会话里是否存在【对话框风格卡片】(带按钮的交互卡片)，并判断类型。
+
+        返回 {"kind": "resume"|"location"|"unknown"|"none", "text": 卡片文本}。
+        - resume  ：索要简历对话框（文本含"附件简历/简历"且有"同意/拒绝"按钮）。
+        - location：地点确认对话框（文本含"工作地点/是否…城市"且有"接受/同意"按钮）。
+        - unknown ：有对话框按钮但文本不匹配上面两类 → 交人工。
+        - none    ：没有对话框卡片（纯文字气泡，走 LLM 常规分类）。
+        """
+        try:
+            info = await self.page.evaluate(r"""() => {
+                // 在对方消息(.item-friend)里找带按钮的对话框卡片
+                const out = {hasBtn:false, text:"", btns:[]};
+                for (const el of document.querySelectorAll('.item-friend')) {
+                    const btns = [...el.querySelectorAll('button,a[role=button],[class*=btn]')]
+                        .map(b => (b.textContent||'').trim())
+                        .filter(t => t && t.length < 8);
+                    // 卡片特征：消息气泡内含 同意/拒绝/接受/可以 等操作按钮
+                    const actBtns = btns.filter(t => /同意|拒绝|接受|可以|确认|去填写|查看/.test(t));
+                    if (actBtns.length >= 1) {
+                        out.hasBtn = true;
+                        out.text = (el.textContent||'').replace(/\s+/g,' ').trim().slice(0,120);
+                        out.btns = actBtns;
+                    }
+                }
+                return out;
+            }""")
+        except Exception:
+            return {"kind": "none", "text": ""}
+        if not info or not info.get("hasBtn"):
+            return {"kind": "none", "text": ""}
+        text = info.get("text", "")
+        btns = info.get("btns", [])
+        # 分类：简历对话框
+        if ("简历" in text) and any(b in ("同意", "拒绝") for b in btns):
+            return {"kind": "resume", "text": text}
+        # 地点确认对话框
+        if (("工作地点" in text or "地点" in text or "是否" in text or "意愿" in text or "base" in text.lower())
+                and any(b in ("接受", "同意", "可以") for b in btns)):
+            return {"kind": "location", "text": text}
+        # 有按钮但不匹配已知类型 → 未知对话框
+        return {"kind": "unknown", "text": text + f" [按钮:{'/'.join(btns)}]"}
+
+    async def _pause_for_manual(self, company: str, position: str, text: str):
+        """遇到无法识别的对话框 → 截图 + 暂停等用户手动处理（轮询等待，避免默默跳过重要交互）。"""
+        safe = re.sub(r"[^\w一-龥]", "_", f"{company}_{position}")[:40]
+        try:
+            await za.screenshot_page(self.page, f"unknown_dialog_{safe}.png")
+        except Exception:
+            pass
+        zhipin_status.upsert_status(
+            self.status_data, company, position, "unread",
+            task_source=TASK_SOURCE, note=f"未知对话框,需人工: {text[:60]}",
+            reply_text=text, intent="unknown_dialog",
+        )
+        print("\n  🛑 检测到【无法识别的对话框消息】，需要人工确认：", flush=True)
+        print(f"     公司/职位: {company} | {position}", flush=True)
+        print(f"     对话框内容: {text[:100]}", flush=True)
+        print(f"     截图: unknown_dialog_{safe}.png", flush=True)
+        print("     请在浏览器里手动处理该对话框，处理完按 Enter 继续...", flush=True)
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, za._prompt_once,
+                                                           "  手动处理完该对话框后按 Enter 继续... ")
+        except Exception:
+            await asyncio.sleep(20)
+
     async def _extract_other_last_messages(self) -> tuple[bool, str, bool]:
         """
         进入会话后，提取对方(BOSS)发的消息。
@@ -1006,13 +1072,25 @@ class ZhipinMessageScanner:
 
         has_other, other_text, is_dialog_card = await self._extract_other_last_messages()
 
-        # 【对话框风格索要简历】短路（用户指令）：会话里出现带"同意"按钮的附件简历对话框卡片，
-        # 检测到就直接当 asked_resume 处理、点按钮发简历，忽略卡片后面的系统干扰消息（PK卡等），
-        # 不再纠结"最后一条消息是什么"。
-        if is_dialog_card:
-            print("  🤖 检测到【附件简历对话框卡片】(有'同意'按钮) → 直接发简历（忽略后续系统消息）", flush=True)
+        # 【对话框风格消息】统一识别（用户指令）：会话里出现带按钮的对话框卡片时，先判断它是哪种：
+        #   1) 索要简历对话框（"附件简历/您是否同意"+同意/拒绝）→ 发简历
+        #   2) 地点确认对话框（"工作地点…是否"+接受）→ 按接受城市处理
+        #   3) 其它无法识别的对话框 → 停下来人工确认（对话框通常是需操作的重要交互，不能默默跳过）
+        dialog = await self._detect_dialog_card()
+        if dialog["kind"] == "resume":
+            print("  🤖 检测到【索要简历对话框】→ 直接发简历（忽略后续系统消息）", flush=True)
             return await self._handle_asked_resume(company, position,
                                                    other_text or "附件简历对话框索要", "asked_resume")
+        if dialog["kind"] == "location":
+            print(f"  🤖 检测到【地点确认对话框】文本='{dialog['text'][:40]}' → 按接受城市处理", flush=True)
+            return await self._handle_location_confirm(company, position,
+                                                       dialog["text"] or other_text)
+        if dialog["kind"] == "unknown":
+            # 无法识别的对话框 → 暂停人工确认
+            await self._pause_for_manual(company, position, dialog["text"])
+            return {"company": company, "position": position, "status": "unread",
+                    "intent": "unknown_dialog", "reply_text": dialog["text"],
+                    "note": f"未知对话框,已人工处理: {dialog['text'][:50]}"}
 
         # 情况2：只有我发的招呼、对方无回复 → read_noreply
         if not has_other:
