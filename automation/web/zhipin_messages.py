@@ -181,9 +181,16 @@ SEL = {
         "[class*='resume-item']:has-text('English')",
         "[class*='resume-list'] li:has-text('英文')",
     ],
-    # 简历选择弹窗里：确认发送按钮
+    # 简历【预览】界面右上方的"发送"按钮（实测：选了简历→打开简历预览→右上角发送才真正发出）。
+    # 放在最前面优先匹配；兼容旧的弹窗确认按钮。
     "resume_confirm": [
+        "[class*='preview'] button:has-text('发送')",
+        "[class*='preview'] :has-text('发送')[class*='btn']",
         "[class*='dialog'] button:has-text('发送')",
+        "[class*='resume'] button:has-text('发送')",
+        ".boss-dialog button:has-text('发送')",
+        "button:has-text('发送')",
+        "[class*='btn']:has-text('发送')",
         "button:has-text('确定')",
         "[class*='resume'] .btn-confirm",
     ],
@@ -757,16 +764,20 @@ class ZhipinMessageScanner:
             print("  [WARN] 未找到简历版本选项（可能无选择弹窗或选择器待确认）", flush=True)
         za.human_delay(1.0, 2.0)
 
-        # 3) 确认发送（若弹窗有确认按钮）
+        # 3) 简历【预览】界面右上方的"发送"按钮 —— 选了简历后会打开简历预览，
+        #    必须点右上角"发送"才真正发出（实测：之前卡在这一步没点到）。
+        za.human_delay(1.0, 1.8)  # 等预览界面渲染
         ok_confirm = await self.click_smart(
             SEL["resume_confirm"],
-            "点击简历发送弹窗里的'发送'或'确定'按钮，确认把简历发给对方。",
+            "现在屏幕上是简历预览界面，请点击它【右上方】的'发送'按钮，把简历发给对方。",
             f"resume_confirm_{version}.png",
         )
         if not ok_confirm:
-            print("  ℹ️ 未点到独立的确认按钮（可能选中即发送），请调试时确认是否已发出", flush=True)
+            print("  [WARN] 未点到简历预览的'发送'按钮——简历可能未真正发出（待确认选择器）", flush=True)
+            await za.screenshot_page(self.page, f"resume_preview_stuck_{version}.png")
+            return False
         za.human_delay(1.5, 2.5)
-        print(f"  ✅ 已执行发送【{ver_name}】简历动作（实际是否送达需调试时人工确认）", flush=True)
+        print(f"  ✅ 已点击简历预览'发送'，发出【{ver_name}】简历", flush=True)
         # 发完简历补一句礼貌话
         await self._send_chat_text("简历已发，请您查收")
         return True
