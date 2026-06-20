@@ -731,17 +731,21 @@ class ZhipinMessageScanner:
         """
         try:
             info = await self.page.evaluate(r"""() => {
-                // 在对方消息(.item-friend)里找带按钮的对话框卡片
+                // 在对方消息(.item-friend)里找带【真实操作按钮】的对话框卡片
                 const out = {hasBtn:false, text:"", btns:[]};
                 for (const el of document.querySelectorAll('.item-friend')) {
+                    const full = (el.textContent||'').replace(/\s+/g,' ').trim();
+                    // 跳过系统推送卡片(PK情况/查看详细分析等),这些不是需人工的真实交互
+                    if (/竞争者PK|PK情况|查看详细分析|共人投递|你超过竞争者/.test(full)) continue;
                     const btns = [...el.querySelectorAll('button,a[role=button],[class*=btn]')]
                         .map(b => (b.textContent||'').trim())
                         .filter(t => t && t.length < 8);
-                    // 卡片特征：消息气泡内含 同意/拒绝/接受/可以 等操作按钮
-                    const actBtns = btns.filter(t => /同意|拒绝|接受|可以|确认|去填写|查看/.test(t));
+                    // 真实操作按钮：同意/拒绝/接受/可以/确认/去填写（排除'查看'类系统跳转按钮）
+                    const actBtns = btns.filter(t => /同意|拒绝|接受|可以|确认|去填写/.test(t)
+                                                     && !/查看|详情|分析/.test(t));
                     if (actBtns.length >= 1) {
                         out.hasBtn = true;
-                        out.text = (el.textContent||'').replace(/\s+/g,' ').trim().slice(0,120);
+                        out.text = full.slice(0,120);
                         out.btns = actBtns;
                     }
                 }
