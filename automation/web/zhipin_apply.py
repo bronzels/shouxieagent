@@ -2013,7 +2013,9 @@ class BossZhipinAutomator:
                 try:
                     await self.page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
                     human_delay(1.0, 1.8)
-                    await self._scroll_load_all_cards()
+                    # ⚠️ 反爬：返回列表后【不要】滚到底拉满300卡(实测这个激烈动作触发"访问受限")。
+                    # 只等列表稳定即可；边滚边处理主循环(seen去重)会从首屏继续温和滚动、跳过已处理的。
+                    await self._settle_after_navigation()
                 except Exception:
                     pass
             else:
